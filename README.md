@@ -1,0 +1,1 @@
+The files together comprise the analysis for "Intensified El Niño events are reducing tropical forest arthropod diversity and function" by Sharp, Boyle, Bonebrake, Guo, Kitching, Stork, Zeng & Ashton.
