@@ -1,0 +1,1348 @@
+##### STRONGER EL NINOS REDUCE TROPICAL FOREST 
+##### ARTHROPOD DIVERSITY AND FUNCTION - CODE
+#####
+##### Author: Adam Sharp, Postdoc, University of Hong Kong
+##### Email: asharp@hku.hk
+##### R Version: 4.3.1
+
+### READ ME
+
+# This script operates within a parent directory with sub-directories "code", "data", and "outputs".
+# Please set the working directory to the parent directory.
+# Tested/run on a Macbook Pro M2 with 32GB memory, but this code is not parallelized and doesn't use a huge
+# amount of memory, so should run on most modern machines.
+# All output plots were later modified further using image editing software.
+
+### INITIALIZATION
+
+# Load packages
+library(cowplot) # Version 1.1.3
+library(ggplot2) # Version 3.5.1
+library(ggtext) # Version 0.1.2
+library(gratia) # Version 0.9.2
+library(grid) # Version 4.3.1
+library(MASS) # Version 7.3-60
+library(mgcv) #Version 1.9-1
+library(vegan) # Version 2.6-8
+library(wCorr) # Version 1.9.8
+
+# Read data files
+data <- read.csv("invertebrate_diversity_data.csv") # Arthropod time series data in long format
+deco <- read.csv("decomposition_data.csv") # Arthropod-mediated decomposition data
+herb <- read.csv("herbivory_data.csv") # Arthropod-mediated leaf herbivory data
+oni <- read.csv("oni.csv") # ENSO stage data
+traits <- read.csv("traits.csv") # Traits of arthropod orders
+wagner.wts <- read.csv("wagner_2021_CR_weights.csv") # Weight adjustments for data from Costa Rica in Wagner et al. (2021)
+
+### PROCESS DIVERSITY DATA
+
+americas.study <- sort(unique(data$STUDY_ID[data$REGION == "Americas"])) # Unique study names with Arthropod data from the Americas
+# Create list of data frames containing derived taxon richness
+div.americas <- lapply(americas.study, function(i){
+  temp <- data[data$STUDY_ID == i & data$REGION == "Americas", ] # Subset taxon records to study i in the Americas
+  uq.sites <- sort(unique(temp$PLOT)) # Unique sites in the study
+  uq.taxa <- sort(unique(temp$GROUP)) # Unique arthropod orders in the study
+  returned <- c() # Initialize object for return
+  # Cycle through sites
+  for(j in uq.sites){
+    uq.time <- unique(temp[temp$PLOT == j, c("MONTH", "YEAR")]) # Find unique time points within site
+    # Cycle through taxa
+    for(k in uq.taxa){
+      temp2 <- temp[!is.na(temp$GROUP) & temp$GROUP == k & temp$PLOT == j,] # Subset again to taxon within site
+      if(nrow(temp2) == 0) next # If the taxon was absent -> Next iteration
+      temp.returned <- data.frame(study = i, group = k, site = j, region = unique(temp2$REGION)) # Initialize temporary object to be appended to returned object
+      temp.time <- uq.time # Copy unique time point vector
+      temp.time$time.scale <- c("month", "year")[as.logical(is.na(uq.time$MONTH[1])) + 1] # Identify time scale: monthly or annual
+      # Cycle through time points and calculate taxon richness
+      temp.time$rich <- vapply(1:nrow(temp.time), function(l){
+        # If the sampling point doesn't have a month value...
+        if(is.na(temp.time$MONTH[l])){
+          temp3 <- temp2[temp2$YEAR == temp.time$YEAR[l], ] # ... filter to entire year
+        } else {
+          temp3 <- temp2[temp2$MONTH == temp.time$MONTH[l] & temp2$YEAR == temp.time$YEAR[l], ] # ... else filter to specific month
+        }
+        if(nrow(temp3) == 0) return(0) # If taxon is absent, return richness of 0...
+        return(length(unique(temp3$TAXON))) # ... otherwise return the number of unique taxa
+      }, 0)
+      # Remove sampling bias highlighted by Wagner et al. (2021) in their Supplementary Material
+      if(i == "WAGNER_et_al_2021"){
+        grep.eois <- grep("eois", temp2$TAXON) # Find "eois" (genus of Geometridae Other)
+        if(length(grep.eois) > 0) temp2 <- temp2[-grep.eois,] # Remove those rows
+        grep.Eois <- grep("Eois", temp2$TAXON) # Find "Eois" (genus of Geometridae Other)
+        if(length(grep.Eois) > 0) temp2 <- temp2[-grep.Eois,] # Remove those rows
+        grep.quadrus <- grep("quadrus", temp2$TAXON) # Find "quadrus" (genus of Hesperiidae Papilionoidea)
+        if(length(grep.quadrus) > 0) temp2 <- temp2[-grep.quadrus,] # Remove those rows
+        grep.Quadrus <- grep("Quadrus", temp2$TAXON) # Find "Quadrus" (genus of Hesperiidae Papilionoidea)
+        if(length(grep.Quadrus) > 0) temp2 <- temp2[-grep.Quadrus,] # Remove those rows
+      }
+      # Cycle through time points and calculate Simpson's index
+      temp.time$simp <- vapply(1:nrow(temp.time), function(l){
+        # If the sampling point doesn't have a month value...
+        if(is.na(temp.time$MONTH[l])){
+          temp3 <- temp2[temp2$YEAR == temp.time$YEAR[l], ] # ... filter to entire year
+        } else {
+          temp3 <- temp2[temp2$MONTH == temp.time$MONTH[l] & temp2$YEAR == temp.time$YEAR[l], ] # ... else filter to specific month
+        }
+        # ... otherwise return the number of unique taxa
+        temp.taxa <- unique(temp3$TAXON) # Get unique taxa
+        count <- vapply(temp.taxa, function(m) return(sum(temp3$ABUNDANCE[temp3$TAXON == m])), 0) # Get counts of each taxon
+        return(diversity(count, "invsimpson")) # Calculate Simpson's index and return value
+      }, 0)
+      temp.time$simp[is.infinite(temp.time$simp)] <- NA # Remove infinite values before scaling
+      temp.returned <- cbind.data.frame(temp.returned, temp.time) # Add time/richness columns to temporary object
+      temp.returned$rich <- scale(temp.returned$rich, center = F) # Standardize richness values to Z
+      temp.returned$simp <- scale(temp.returned$simp-1, center = F) # Standardize Simpson's index values to Z
+      returned <- rbind.data.frame(returned, temp.returned) # Append temporary object to returned
+    }
+  }
+  return(returned) # Return output
+})
+div.americas <- do.call(rbind.data.frame, div.americas) # Combine list items into data frame object
+div.americas$oni <- vapply(1:nrow(div.americas), function(i) if(!is.na(div.americas$MONTH[i])) return(oni[oni$Year == div.americas$YEAR[i], div.americas$MONTH[i]+1]) else return(mean(as.numeric(oni[oni$Year == div.americas$YEAR[i], -1]))), 0) # Assign monthly ONI values to rows
+div.americas$time <- (div.americas$YEAR + div.americas$MONTH/12 - 1/12) - 2000 # Convert months and years to continuous time, and centre on 0
+div.americas$time[is.na(div.americas$time)] <- div.americas$YEAR[is.na(div.americas$time)] - 1999 # For rows where month is missing, assign them the year end-point, and centre on 0
+div.americas$site <- paste(div.americas$study, div.americas$site) # Ensure that sites shared between studies are modeled separately (eg BCI)
+div.americas <- div.americas[order(div.americas$site, div.americas$group, div.americas$time),] # Reorder "div.americas" rows by time, nested within taxonomic group, nested within study site
+
+### ADJUST WEIGHTS FOR WAGNER ET AL (2021)
+
+div.americas$wt <- 1 # Assign all data point weights as 1
+temp.wts <- vapply(div.americas$time[div.americas$site == "WAGNER_et_al_2021 SEL"], function(i) return(wagner.wts$weight[which.min(abs(wagner.wts$time - (i + 0.51)))]), 0) # Get temporary raw weights as recommended by Wagner et al.
+temp.wts <- temp.wts/sum(temp.wts) * length(temp.wts) # Standardize those weights to mean 1
+div.americas$wt[div.americas$study == "WAGNER_et_al_2021 SEL"] <- temp.wts # Replace those adjusted weights in the diversity data frame
+
+### MODELLING TEMPORAL CHANGE IN ARTHROPOD DIVERSITY - ORDER-LEVEL DIVERSITY IN THE AMERICAS
+
+groups.americas <- sort(unique(div.americas$group)) # Get unique arthropod orders
+# Fit order-level arthropod models for the tropical Americas
+div.americas.mods <- 
+  # Return list of models for each arthropod order
+  lapply(groups.americas, function(i){
+    group.data.rich <- div.americas[div.americas$group == i & !is.na(div.americas$rich),] # Subset diversity data to arthropod order i - richness
+    group.data.simp <- div.americas[div.americas$group == i & !is.na(div.americas$simp),] # Subset diversity data to arthropod order i - Simpson's
+    group.data.rich$wt <- group.data.rich$wt/sum(group.data.rich$wt)*nrow(group.data.rich) # Standardize weights - richness
+    group.data.simp$wt <- group.data.simp$wt/sum(group.data.simp$wt)*nrow(group.data.simp) # Standardize weights - richness
+    # Define model formulae dependent on whether some of the data is at mixed temporal resolution or not. If mixed...
+    if("month" %in% group.data.rich$time.scale & "year" %in% group.data.rich$time.scale){
+      rich.formula <- rich ~ 1 + s(oni, k = 3) + time + time:time.scale # Richness formula gets extra parameter for time scale adjustment...
+      simp.formula <- simp ~ 1 + s(oni, k = 3) + time + time:time.scale # Simpson's index formula gets extra parameter for time scale adjustment...
+    } else {
+      rich.formula <- rich ~ 1 + s(oni, k = 3) + time # Otherwise richness formula gets no extra parameter
+      simp.formula <- simp ~ 1 + s(oni, k = 3) + time # And neither does formula for Simpson's index
+    }
+    # If there are 0's in the richness response, use Tweedie distribution
+    if(any(group.data.rich$rich == 0)){
+      # Cycle through values of p to find best fitting Tweedie
+      current.p <- 1.01 # Start p parameter value
+      prev.AIC <- Inf # Start AIC off at maximum
+      lower.AIC <- T # Initialize while test
+      # While lower.AIC is true...
+      while(lower.AIC){
+        mod.rich <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+          gamm(rich.formula, # Fixed and smooth terms
+               random = list(site = ~ 1), # Random intercept
+               weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+               data = group.data.rich, # Data source
+               family = Tweedie(p = current.p), # Tweedie distribution with parameter p
+               correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+               niterPQL = 50), # Increased number of iterations for fit
+          error = function(.) return(NULL)) # Return NULL if fit fails
+        temp.AIC <- AIC(mod.rich$lme) # Get AIC from lme component
+        lower.AIC <- temp.AIC < prev.AIC # AIC test
+        # If the second iteration, and the first had lower AIC...
+        if(current.p == 1.02 & prev.AIC < temp.AIC){
+          mod.rich <- prev.mod # The first model gets assigned
+          lower.AIC <- F # Failed while test breaks loop
+        } else {
+          current.p <- current.p + 0.01 # Next p parameter value
+          prev.AIC <- temp.AIC # Previous AIC value gets current
+          prev.mod <- mod.rich # Previous model gets current
+        }
+      }
+    # If not 0's in the response, use Gamma distribution
+    } else {
+      mod.rich <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+        gamm(rich.formula, # Fixed and smooth terms
+             random = list(site = ~ 1), # Random intercept
+             weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+             data = group.data.rich, # Data source
+             family = Gamma("log"), # Gamma distribution error
+             correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+             niterPQL = 50), # Increased number of iterations for fit
+        error = function(.) return(NULL)) # Return NULL if fit fails
+    }
+    # If there are 0's in the Simpson's index response, use Tweedie distribution
+    if(any(group.data.simp$simp == 0)){
+      # Cycle through values of p to find best fitting Tweedie
+      current.p <- 1.01 # Start p parameter value
+      prev.AIC <- Inf # Start AIC off at maximum
+      lower.AIC <- T # Initialize while test
+      # While lower.AIC is true...
+      while(lower.AIC){
+        mod.simp <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+          gamm(simp.formula, # Fixed and smooth terms
+               random = list(site = ~ 1), # Random intercept
+               weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+               data = group.data.simp, # Data source
+               family = Tweedie(p = current.p), # Tweedie distribution with parameter p
+               correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+               niterPQL = 50), # Increased number of iterations for fit
+          error = function(.) return(NULL)) # Return NULL if fit fails
+        temp.AIC <- AIC(mod.simp$lme) # Get AIC from lme component
+        lower.AIC <- temp.AIC < prev.AIC # AIC test
+        # If the second iteration, and the first had lower AIC...
+        if(current.p == 1.02 & prev.AIC < temp.AIC){
+          mod.simp <- prev.mod # The first model gets assigned
+          lower.AIC <- F # Failed while test breaks loop
+        } else {
+          current.p <- current.p + 0.01 # Next p parameter value
+          prev.AIC <- temp.AIC # Previous AIC value gets current
+          prev.mod <- mod.simp # Previous model gets current
+        }
+      }
+    } else {
+      mod.simp <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+        gamm(simp.formula, # Fixed and smooth terms
+             random = list(site = ~ 1), # Random intercept
+             weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+             data = group.data.simp, # Data source
+             family = Gamma("log"), # Gamma distribution error
+             correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+             niterPQL = 50), # Increased number of iterations for fit
+        error = function(.) return(NULL)) # Return NULL if fit fails
+    }
+    return(list(rich = mod.rich$gam, simp = mod.simp$gam)) # Return list of lists
+  })
+# Create data frame of summary information
+div.americas.mods.summaries <- 
+  cbind.data.frame( # Bind columns
+    Order = rep(groups.americas, each = 2), # Order names
+    # Cycle through selected order-level models and return output in data frame to be incorporated
+    do.call(rbind.data.frame, lapply(div.americas.mods, function(x){
+      fixef.rich <- summary(x$rich)$p.table # Get summary of fixed effects for richness model
+      if(nrow(fixef.rich) == 2) fixef.rich <- rbind.data.frame(fixef.rich, NA) # If there is only one row in the fixed effects summary (no time scale adjustment term), add a row of NA values
+      smooth.rich <- summary(x$rich)$s.table # Get summary of smooth term for richness model
+      returned.rich <- data.frame( # Create returned data frame for terms of richness model
+        Diversity = "Richness",
+        Intercept.Estimate = round(fixef.rich[1,1], 3),
+        Intercept.SE = round(fixef.rich[1,2], 3),
+        Intercept.t = round(fixef.rich[1,3], 3),
+        Intercept.p = round(fixef.rich[1,4], 3),
+        Time.Gradient.Estimate = round(fixef.rich[2,1], 3),
+        Time.Gradient.SE = round(fixef.rich[2,2], 3),
+        Time.Gradient.t = round(fixef.rich[2,3], 3),
+        Time.Gradient.p = round(fixef.rich[2,4], 3),
+        Time.Scale.Gradient.Estimate = round(fixef.rich[3,1], 3),
+        Time.Scale.Gradient.SE = round(fixef.rich[3,2], 3),
+        Time.Scale.Gradient.t = round(fixef.rich[3,3], 3),
+        Time.Scale.Gradient.p = round(fixef.rich[3,4], 3),
+        ONI.Smooth.EDF = round(smooth.rich[1,1], 3),
+        ONI.Smooth.Ref.DF = round(smooth.rich[1,2], 3),
+        ONI.Smooth.F = round(smooth.rich[1,3], 3),
+        ONI.Smooth.p = round(smooth.rich[1,4], 3)
+      )
+      fixef.simp <- summary(x$simp)$p.table # Get summary of fixed effects for Simpson's index model
+      if(nrow(fixef.simp) == 2) fixef.simp <- rbind.data.frame(fixef.simp, NA) # If there is only one row in the fixed effects summary (no time scale adjustment term), add a row of NA values
+      smooth.simp <- summary(x$simp)$s.table # Get summary of smooth term for Simpson's index model
+      returned.simp <- data.frame( # Create returned data frame for terms of Simpson's index model
+        Diversity = "Inverse\nSimpson's",
+        Intercept.Estimate = round(fixef.simp[1,1], 3),
+        Intercept.SE = round(fixef.simp[1,2], 3),
+        Intercept.t = round(fixef.simp[1,3], 3),
+        Intercept.p = round(fixef.simp[1,4], 3),
+        Time.Gradient.Estimate = round(fixef.simp[2,1], 3),
+        Time.Gradient.SE = round(fixef.simp[2,2], 3),
+        Time.Gradient.t = round(fixef.simp[2,3], 3),
+        Time.Gradient.p = round(fixef.simp[2,4], 3),
+        Time.Scale.Gradient.Estimate = round(fixef.simp[3,1], 3),
+        Time.Scale.Gradient.SE = round(fixef.simp[3,2], 3),
+        Time.Scale.Gradient.t = round(fixef.simp[3,3], 3),
+        Time.Scale.Gradient.p = round(fixef.simp[3,4], 3),
+        ONI.Smooth.EDF = round(smooth.simp[1,1], 3),
+        ONI.Smooth.Ref.DF = round(smooth.simp[1,2], 3),
+        ONI.Smooth.F = round(smooth.simp[1,3], 3),
+        ONI.Smooth.p = round(smooth.simp[1,4], 3)
+      )
+      return(rbind.data.frame(returned.rich, returned.simp)) # Return single data frame
+    })))
+write.csv(div.americas.mods.summaries, file = "outputs/diversity_americas_summary.csv", row.names = F) # Write GAM summaries to file
+
+### PREDICTING DIVERSITY SHIFTS FROM FITTED MODELS - ORDER-LEVEL DIVERSITY IN THE AMERICAS
+
+temp.month <- data.frame(year = rep(min(div.americas$YEAR):max(div.americas$YEAR), each = 12), month = 1:12, time.scale = "month") # Initialize template data frame representing a monthly time series from earliest to latest data
+temp.month$time <- (temp.month$year + temp.month$month/12 - 1/12) - 2000 # Convert days years and months into continuous time centered on year 2000
+temp.month$oni <- vapply(1:nrow(temp.month), function(i) return(oni[oni$Year == temp.month$year[i], temp.month$month[i] + 1]), 0) # Extract the ONI value per month
+pred.americas <- c() # Initialize object for appending predictions to, to be predicted from later
+# Cycle through order-level groups and generate predictions
+for(i in 1:length(groups.americas)){
+    temp.month2 <- temp.month # New template to be appended to
+    temp.years <- div.americas$YEAR[div.americas$group == groups.americas[i]] # Retrieve the years for which data on that order is available
+    temp.month2 <- temp.month2[temp.month2$year %in% temp.years,] # Subset rows to only those for years between the earliest and latest time point for that order
+    rich.mat <- predict(div.americas.mods[[i]]$rich, temp.month2, type = "lpmatrix") # Get richness predictor for time plus smooth on ONI variable
+    rich.coef <- coef(div.americas.mods[[i]]$rich) # Get richness coefficient estimates
+    rich.covar <- vcov(div.americas.mods[[i]]$rich) # And richness coefficient variance-covariance matrix
+    rich.rand <- mvrnorm(10000, rich.coef, rich.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+    rich.pred <- exp(as.matrix(rich.rand) %*% t(rich.mat)) # Derive 10,000 predictions
+    rich.qt <- as.data.frame(t(apply(rich.pred, 2, quantile, c(0.025, 0.5, 0.975)))) # Get quantiles from predictions
+    simp.mat <- predict(div.americas.mods[[i]]$simp, temp.month2, type = "lpmatrix") # Get Simpson's index predictor for time plus smooth on ONI variable
+    simp.coef <- coef(div.americas.mods[[i]]$simp) # Get Simpson's index coefficient estimates
+    simp.covar <- vcov(div.americas.mods[[i]]$simp) # And Simpson's index coefficient variance-covariance matrix
+    simp.rand <- mvrnorm(10000, simp.coef, simp.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+    simp.pred <- exp(as.matrix(simp.rand) %*% t(simp.mat)) # Derive 10,000 predictions
+    simp.qt <- as.data.frame(t(apply(simp.pred, 2, quantile, c(0.025, 0.5, 0.975)))) # Get quantiles from predictions
+    names(rich.qt) <- names(simp.qt) <- c("lwr", "med", "upr") # Give quantiles sensible names
+    temp.div.americas <- rbind.data.frame(cbind.data.frame(Order = groups.americas[i], Diversity = "Richness", temp.month2, rich.qt), cbind.data.frame(Order = groups.americas[i], Diversity = "Inverse\nSimpson's", temp.month2, simp.qt)) # Combine prediction quantiles for richness and Simpson's index
+    pred.americas <- rbind.data.frame(pred.americas, temp.div.americas) # Add predictions to pred object
+}
+pred.americas$time2 <- (pred.americas$year + pred.americas$month/12 - 1/12) - 2000 # Convert days years and months into continuous time centered on year 2000
+write.csv(pred.americas, "outputs/predictions_americas.csv", row.names = F) # Write predictions to file
+
+### POST-HOC ANALYSIS OF ORDER-LEVEL MODEL PREDICTIONS AND ORDER TRAITS
+
+pred.delta <- c() # Initialize object for appending predictions to, to be modeled from later
+pred.df <- list(enso = data.frame(oni = c(-1.1, 1.9), time = c(0, 0), time.scale = "month"), delta = data.frame(oni = c(0, 0), time = c(0, 1), time.scale = "month")) # List of data frames from which to predict change in ENSO and long-term change
+rand.vals <- list() # Initialize list object to append resampled values to
+# Cycle through groups
+for(i in 1:length(groups.americas)){
+  rich.coef <- coef(div.americas.mods[[i]]$rich) # Get richness coefficient estimates
+  rich.covar <- vcov(div.americas.mods[[i]]$rich) # And richness coefficient variance-covariance matrix
+  rich.rand <- mvrnorm(10000, rich.coef, rich.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+  simp.coef <- coef(div.americas.mods[[i]]$simp) # Get Simpson's index coefficient estimates
+  simp.covar <- vcov(div.americas.mods[[i]]$simp) # And Simpson's index coefficient variance-covariance matrix
+  simp.rand <- mvrnorm(10000, simp.coef, simp.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+  temp.vals <- list() # Temporary list object to append predictions to
+  # Cycle through type of prediction: 1 = change in ONI, 2 = long-term change
+  for(j in 1:2){
+    rich.mat <- predict(div.americas.mods[[i]]$rich, pred.df[[j]], type = "lpmatrix") # Get richness predictor for time plus smooth on ONI variable
+    simp.mat <- predict(div.americas.mods[[i]]$simp, pred.df[[j]], type = "lpmatrix") # Get Simpson's index predictor for time plus smooth on ONI variable
+    rich.pred <- exp(as.matrix(rich.rand) %*% t(rich.mat)) # Derive 10,000 predictions
+    rich.pred <- rich.pred[, 2] - rich.pred[, 1] # Subtract end values from start values to calculate change
+    rich.qt <- data.frame(t(quantile(rich.pred, c(0.0005, 0.005, 0.025, 0.5, 0.975, 0.995, 0.9995)))) # Derive quantiles of change
+    simp.pred <- exp(as.matrix(simp.rand) %*% t(simp.mat)) # Derive 10,000 predictions
+    simp.pred <- simp.pred[, 2] - simp.pred[, 1] # Subtract end values from start values
+    simp.qt <- data.frame(t(quantile(simp.pred, c(0.0005, 0.005, 0.025, 0.5, 0.975, 0.995, 0.9995)))) # Derive quantiles of change
+    names(rich.qt) <- names(simp.qt) <- c("lwr.99.9", "lwr.99", "lwr.95", "med", "upr.95", "upr.99", "upr.99.9") # Give quantiles sensible names
+    temp.div <- rbind.data.frame(cbind.data.frame(Variable = c("ENSO", "Time")[j], Order = groups.americas[i], Diversity = "Richness", rich.qt), cbind.data.frame(Variable = c("ENSO", "Time")[j], Order = groups.americas[i], Diversity = "Inverse Simpson's Index", simp.qt)) # Temporary data frame of quantiles
+    pred.delta <- rbind.data.frame(pred.delta, temp.div) # Append quantile values to prediction data frame
+    temp.vals[[length(temp.vals) + 1]] <- list(rich = rich.pred, simp = simp.pred) # Append change values to temporary list
+  }
+  names(temp.vals) <- c("ENSO", "Time") # Give temporary list items sensible names
+  rand.vals[[length(rand.vals) + 1]] <- temp.vals # Append temporary list to list of resampled values
+}
+write.csv(pred.delta, file = "outputs/bootstrapped_delta_quantiles_for_americas.csv", row.names = F) # Write quantiles to file
+traits$log.n <- log(traits$tropical_richness) # Convert global richness to log-scale
+# Boostrapped correlation estimates (n = 10,000)
+rich.enso.mods <- vapply(1:10000, function(i){
+  y <- vapply(rand.vals, function(j) return(j$ENSO$rich[i]), 0) # Estimates of moderate La Nina diversity -> strong El Nino richness
+  cor.div <- cor(traits$log.n, y) # Correlation y ~ log global richness
+  cor.det <- cor(traits$p.det, y) # Correlation y ~ Detritivores
+  cor.herb <- cor(traits$p.herb, y) # Correlation y ~ herbivory
+  cor.pred <- cor(traits$p.pred, y) # Correlation y ~ predatory
+  cor.paras <- cor(traits$p.paras, y) # Correlation y ~ parastic
+  return(c(NA, cor.div, cor.det, cor.herb, cor.pred, cor.paras)) # Return correlation values
+}, rep(0, 6))
+# Boostrapped correlation estimates (n = 10,000)
+simp.enso.mods <- vapply(1:10000, function(i){
+  y <- vapply(rand.vals, function(j) return(j$ENSO$simp[i]), 0) # Estimates of moderate La Nina diversity -> strong El Nino Simpson's index
+  cor.div <- cor(traits$log.n, y) # Correlation y ~ log global richness
+  cor.det <- cor(traits$p.det, y) # Correlation y ~ Detritivores
+  cor.herb <- cor(traits$p.herb, y) # Correlation y ~ herbivory
+  cor.pred <- cor(traits$p.pred, y) # Correlation y ~ predatory
+  cor.paras <- cor(traits$p.paras, y) # Correlation y ~ parastic
+  return(c(NA, cor.div, cor.det, cor.herb, cor.pred, cor.paras)) # Return correlation values
+}, rep(0, 6))
+# Boostrapped correlation estimates (n = 10,000)
+rich.delta.mods <- vapply(1:10000, function(i){
+  x <- vapply(rand.vals, function(j) return(j$ENSO$rich[i]), 0) # Estimates of moderate La Nina diversity -> strong El Nino richness
+  y <- vapply(rand.vals, function(j) return(j$Time$rich[i]), 0) # Estimates of richness shift over one year
+  cor.enso <- cor(x, y) # Correlation y ~ x
+  cor.div <- cor(traits$log.n, y) # Correlation y ~ log global richness
+  cor.det <- cor(traits$p.det, y) # Correlation y ~ Detritivores
+  cor.herb <- cor(traits$p.herb, y) # Correlation y ~ herbivory
+  cor.pred <- cor(traits$p.pred, y) # Correlation y ~ predatory
+  cor.paras <- cor(traits$p.paras, y) # Correlation y ~ parastic
+  return(c(cor.enso, cor.div, cor.det, cor.herb, cor.pred, cor.paras)) # Return correlation value
+}, rep(0, 6))
+# Boostrapped correlation estimates (n = 10,000)
+simp.delta.mods <- vapply(1:10000, function(i){
+  x <- vapply(rand.vals, function(j) return(j$ENSO$simp[i]), 0) # Estimates of moderate La Nina diversity -> strong El Nino Simpson's index
+  y <- vapply(rand.vals, function(j) return(j$Time$simp[i]), 0) # Estimates of Simpson's index shift over one year
+  cor.enso <- cor(x, y) # Correlation y ~ x
+  cor.div <- cor(traits$log.n, y) # Correlation y ~ log global richness
+  cor.det <- cor(traits$p.det, y) # Correlation y ~ Detritivores
+  cor.herb <- cor(traits$p.herb, y) # Correlation y ~ herbivory
+  cor.pred <- cor(traits$p.pred, y) # Correlation y ~ predatory
+  cor.paras <- cor(traits$p.paras, y) # Correlation y ~ parastic
+  return(c(cor.enso, cor.div, cor.det, cor.herb, cor.pred, cor.paras)) # Return correlation value
+}, rep(0, 6))
+
+### PLOT PREDICTED ARTHROPOD DIVERSITY SHIFTS IN THE AMERICAS (FIG. 1)
+
+pred.americas$line_group <- NA # Add column for separating individual line stretches for each arthropod order
+pred.americas$line_group[1] <- line.group <- 1 # Start at line 1
+# Iterate through line numbers
+for(i in 2:nrow(pred.americas)){
+  # If the current row is for a different inverbrate order to the last...
+  if(pred.americas$Order[i] != pred.americas$Order[i-1]){
+    line.group <- pred.americas$line_group[i] <- 1 # Line group gets reset to 1...
+    next # ... and next iteration
+  }
+  if(pred.americas$time[i] > (pred.americas$time[i-1] + 1) | pred.americas$Diversity[i] != pred.americas$Diversity[i-1]) line.group <- line.group + 1 # If there is a gap in prediction time or the diversity measure changes, start a new line section
+  pred.americas$line_group[i] <- line.group # Prediction data frame row i gets line group
+}
+pred.americas$Trend <- "No Trend" # Add column defining long-term trend significance
+# Cycle through arthropod orders
+for(i in groups.americas){
+  # Cycle through diversity measures
+  for(j in c("Richness", "Inverse\nSimpson's")){
+    if(div.americas.mods.summaries$Time.Gradient.p[div.americas.mods.summaries$Order == i & div.americas.mods.summaries$Diversity == j] < 0.05) pred.americas$Trend[pred.americas$Order == i & pred.americas$Diversity == j] <- "Significant<br>(*P* < 0.05)" # Where long-term trend was significant in the model summary, update new column
+  }
+}
+pred.americas$upr[pred.americas$upr > 1.8] <- 1.8 # Cut off 97.5% intervals extending beyond 1.8 (impacts Blattodea only)
+pred.americas$Diversity <- factor(pred.americas$Diversity, levels = c("Richness", "Inverse\nSimpson's")) # Order diversity factor levels
+pred.americas$Order <- factor(pred.americas$Order, levels = c("Araneae", "Diptera", "Hymenoptera", "Blattodea", "Hemiptera", "Lepidoptera", "Coleoptera")) # Order diversity factor levels
+p1a <- ggplot(pred.americas) + # Plot temporal predictions using ggplot
+  facet_wrap(~ Order, nrow = 3, dir = "v") +   # Grid of 3x3 sub-plots
+  geom_ribbon(aes(x = time, ymin = lwr, ymax = upr, fill = Diversity, group = line_group), alpha = 0.25) +   # Confidence intervals
+  geom_line(aes(x = time, y = med, color = Diversity, group = line_group, linetype = Trend), linewidth = 0.25) + # Model lines
+  # Display adjustments
+  theme_light() +
+  theme(text = element_text(size = 10), strip.text = element_text(colour = "black"), axis.text.x = element_text(angle = 75, hjust = 1), strip.background = element_rect(fill = "grey90", colour = "grey10"),
+        legend.position = "inside", legend.position.inside = c(0.85, 0.3), legend.spacing.x = unit(0, 'cm'), legend.spacing.y = unit(0.0, 'cm')) +
+  guides(colour = guide_legend(ncol = 3, label.hjust=0)) +
+  scale_x_continuous("Year", breaks = seq(-20, 20, by = 10), labels = seq(1980, 2020, 10), expand = c(0,0)) +
+  scale_y_continuous("Diversity in Tropical Americas (Z)", breaks = c(0, 0.5, 1, 1.5, 2), expand = c(0,0)) +
+  scale_fill_manual("Diversity\nMeasure", breaks = c("Richness", "Inverse\nSimpson's"), values = c("skyblue3", "orange2")) +
+  scale_color_manual("Diversity\nMeasure", breaks = c("Richness", "Inverse\nSimpson's"), values = c("skyblue3", "orange2")) +
+  scale_linetype_manual("Long-Term\nTrend", values = c(3, 1))
+# Output plot to pdf
+pdf("outputs/figure_1_top.pdf", width = 5, height = 5)
+p1a
+dev.off()
+test.sig <- function(x) return(sign(quantile(x, 0.025)) == sign(quantile(x, 0.975))) # Test for if correlations differ significantly from 0 at *P* < 0.05
+trait.cors <- rbind.data.frame( # Create data frame of trait correlations for plotting
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "El Niño Response", val = rich.enso.mods[1,], sig = NA), # NA
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "Regional Richness", val = rich.enso.mods[2,], sig = test.sig(rich.enso.mods[2,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "Proportion Detritivores", val = rich.enso.mods[3,], sig = test.sig(rich.enso.mods[3,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Detritivores
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "Proportion Herbivores", val = rich.enso.mods[4,], sig = test.sig(rich.enso.mods[4,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Herbivores
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "Proportion Predators", val = rich.enso.mods[5,], sig = test.sig(rich.enso.mods[5,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Predators
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Richness", Variable = "Proportion Parasites", val = rich.enso.mods[6,], sig = test.sig(rich.enso.mods[6,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Parasites
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "El Niño Response", val = simp.enso.mods[1,], sig = NA), # NA
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "Regional Richness", val = simp.enso.mods[2,], sig = test.sig(simp.enso.mods[2,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "Proportion Detritivores", val = simp.enso.mods[3,], sig = test.sig(simp.enso.mods[3,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Detritivores
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "Proportion Herbivores", val = simp.enso.mods[4,], sig = test.sig(simp.enso.mods[4,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Herbivores
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "Proportion Predators", val = simp.enso.mods[5,], sig = test.sig(simp.enso.mods[5,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Predators
+  cbind.data.frame(Response = "El Niño Response", Diversity = "Inverse\nSimpson's", Variable = "Proportion Parasites", val = simp.enso.mods[6,], sig = test.sig(simp.enso.mods[6,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Parasites
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "El Niño Response", val = rich.delta.mods[1,], sig = test.sig(rich.delta.mods[1,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "Regional Richness", val = rich.delta.mods[2,], sig = test.sig(rich.delta.mods[2,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "Proportion Detritivores", val = rich.delta.mods[3,], sig = test.sig(rich.delta.mods[3,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Detritivores
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "Proportion Herbivores", val = rich.delta.mods[4,], sig = test.sig(rich.delta.mods[4,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Herbivores
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "Proportion Predators", val = rich.delta.mods[5,], sig = test.sig(rich.delta.mods[5,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Predators
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Richness", Variable = "Proportion Parasites", val = rich.delta.mods[6,], sig = test.sig(rich.delta.mods[6,])), # El Nino response on richness (strong El Nino vs moderate La Nina) ~ Parasites
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "El Niño Response", val = simp.delta.mods[1,], sig = test.sig(simp.delta.mods[1,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "Regional Richness", val = simp.delta.mods[2,], sig = test.sig(simp.delta.mods[2,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ richness in Americas
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "Proportion Detritivores", val = simp.delta.mods[3,], sig = test.sig(simp.delta.mods[3,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Detritivores
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "Proportion Herbivores", val = simp.delta.mods[4,], sig = test.sig(simp.delta.mods[4,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Herbivores
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "Proportion Predators", val = simp.delta.mods[5,], sig = test.sig(simp.delta.mods[5,])), # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Predators
+  cbind.data.frame(Response = "Long-Term Trend", Diversity = "Inverse\nSimpson's", Variable = "Proportion Parasites", val = simp.delta.mods[6,], sig = test.sig(simp.delta.mods[6,])) # El Nino response on Inverse Simpson's index (strong El Nino vs moderate La Nina) ~ Parasites
+)
+trait.cors$Diversity <- factor(trait.cors$Diversity, rev(unique(trait.cors$Diversity))) # Put diversity measures in order
+trait.cors$Variable <- factor(trait.cors$Variable, levels = rev(c("Proportion Detritivores", "Proportion Herbivores", "Proportion Parasites", "Proportion Predators", "Regional Richness", "El Niño Response"))) # Put trait variables in order
+p1b <- ggplot(trait.cors) + # Plot trait correlations using ggplot
+  facet_grid(~ Response) + # Two panels
+  annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf, alpha = 0.15) + # Grey background band
+  annotate("rect", xmin = 3.5, xmax = 4.5, ymin = -Inf, ymax = Inf, alpha = 0.15) + # Grey background band
+  annotate("rect", xmin = 5.5, xmax = 6.5, ymin = -Inf, ymax = Inf, alpha = 0.15) + # Grey background band
+  geom_hline(aes(yintercept = 0), col = "grey50", linewidth = 0.25) + # Vertical 0 lines
+  geom_violin(aes(x = Variable, y = val, fill = Diversity, linetype = sig), position = position_dodge(width = 1), show.legend = F, linewidth = 0.25) + # Violins of bootstrapped values
+  # Display adjustments
+  coord_flip() +
+  theme_light() +
+  scale_linetype_manual(values = c(0, 1)) +
+  scale_y_continuous("Bootstrapped Correlation", breaks = c(-1, -0.5, 0, 0.5, 1), expand = c(0,0)) +
+  theme(text = element_text(size = 10), strip.text = element_text(colour = "black"), axis.title.x = element_text(size = 10), strip.background = element_rect(fill = "grey90", colour = "grey10"), plot.margin = unit(c(0.2,0.2,0.2,0.2), "cm")) +
+  scale_fill_manual(values = c("orange2", "skyblue3")) +
+  xlab(element_blank())
+pdf("outputs/figure_1_bottom.pdf", width = 5, height = 2)
+p1b
+dev.off()
+
+### PLOTTING ORDER-LEVEL ONI SMOOTHS FROM THE AMERICAS (ED1b)
+
+smooth.fits <- c() # Initialize object to append smooth data too
+# Cycle through arthropod orders
+for(i in 1:7){
+  # Cycle through diversity measures
+  for(j in 1:2){
+    temp.smooth <- gratia::draw(div.americas.mods[[i]][[j]], residuals = TRUE) # Get rough smooth plot via gratia
+    temp.smooth.fit <- as.data.frame(temp.smooth$data) # Extract the plotting data
+    smooth.fits <- rbind.data.frame(smooth.fits, cbind.data.frame(Order = groups.americas[i], Diversity = c("Richness", "Inverse<br>Simpson's")[j], temp.smooth.fit, sig = c("No Effect", "Significant<br>(*P* < 0.05)")[as.numeric(summary(div.americas.mods[[i]][[j]])$s.table[1,4] < 0.05) + 1])) # Append the plotting data to data frame
+  }
+}
+smooth.fits$Order <- factor(smooth.fits$Order, levels = c("Araneae", "Hemiptera", "Blattodea", "Hymenoptera", "Coleoptera", "Lepidoptera", "Diptera")) # Order diversity factor levels
+pED1 <- ggplot(smooth.fits) + # Plot smooths using ggplot
+  facet_wrap(~ Order, scales = "free_y", dir = "v", nrow = 2) + # Grid of subplots
+  geom_ribbon(aes(x = oni, ymin = .lower_ci, ymax = .upper_ci, fill = Diversity), alpha = 0.25) + # Confidence intervals
+  geom_line(aes(x = oni, y = .estimate, linetype = sig, col = Diversity), linewidth = 0.25) + # Model lines
+  # Display adjustments
+  theme_light() +
+  theme(text = element_text(size = 7), strip.text = element_text(colour = "black"), strip.background = element_rect(fill = "grey90", colour = "grey10"), legend.text = element_markdown(), legend.key.size = unit(0.5, "cm"), legend.margin = margin(0, 0, 0, 0, "cm")) +
+  scale_y_continuous("Partial Effect") +
+  xlab("ONI") +
+  scale_linetype_manual("ENSO Effect", values = c(3, 1)) +
+  scale_color_manual(breaks = rev(c("Inverse<br>Simpson's", "Richness")), values = c("skyblue3", "orange2")) +
+  scale_fill_manual(breaks = rev(c("Inverse<br>Simpson's", "Richness")), values = c("skyblue3", "orange2"))
+# Output plot to pdf
+pdf("outputs/pED1.pdf", height = 2.5, width = 6.5)
+pED1
+dev.off()
+
+### PLOTTING ORDER-LEVEL ONI RESPONSES (LA NINA TO EL NINO) FOR THE AMERICAS (ED3)
+
+pred.delta$alt.point <- vapply(1:nrow(pred.delta), function(i) return(pred.delta$med[pred.delta$Variable != pred.delta$Variable[i] & pred.delta$Order == pred.delta$Order[i] & pred.delta$Diversity == pred.delta$Diversity[i]]), 0) # Creat new column of points on other axis
+pred.delta$Diversity <- factor(pred.delta$Diversity, levels = unique(pred.delta$Diversity))
+pED3 <- ggplot(pred.delta[pred.delta$Variable == "Time",]) + # Plot comparison of El Nino responses and long-term trend using ggplot
+  facet_wrap(~ Diversity, scales = "free_x") + # Diversity measures side-by-side
+  geom_hline(aes(yintercept = 0), colour = "grey50", linewidth = 0.25) + # Horizontal 0 line
+  geom_vline(aes(xintercept = 0), colour = "grey50", linewidth = 0.25) + # Vertical 0 line
+  geom_errorbar(aes(x = alt.point, ymin = lwr.95, ymax = upr.95, col = Diversity), show.legend = F, width = 0) + # Draw 95% CI in y-direction
+  geom_errorbarh(aes(y = alt.point, xmin = lwr.95, xmax = upr.95, col = Diversity), data = pred.delta[pred.delta$Variable == "ENSO",], show.legend = F, height = 0) + # Draw 95% CI in x-direction
+  # Display adjustments
+  scale_color_manual(breaks = rev(c("Inverse Simpson's Index", "Richness")), values = c("skyblue3", "orange2")) +
+  xlab("El Niño Response (*Z*)") +
+  ylab("Long-Term Trend (*Z*/year)") +
+  theme_light() +
+  theme(text = element_text(size = 7), strip.text = element_text(colour = "black"), strip.background = element_rect(fill = "grey90", colour = "grey10"), axis.title = element_markdown())
+# Output plot to pdf
+pdf("outputs/pED3.pdf", height = 3, width = 5)
+pED3
+dev.off()
+
+### MODELLING TEMPORAL CHANGE IN ARTHROPOD DIVERSITY - LEPIDOPTERA DIVERSITY IN THE AMERICAS AND ASIA
+
+lep.studies <- c("BONEBRAKE_et_al_2016", "WAGNER_et_al_2021", "LUK_et_al_2019") # Only the Lepidoptera-specific time series studies
+# Cycle trough studies
+div.lep <- lapply(lep.studies, function(i){
+  temp <- data[data$STUDY_ID == i & data$GROUP == "Lepidoptera" & !is.na(data$LEPIDOPTERA_SUPERFAMILY), ] # Subset taxon records to study i
+  uq.sites <- sort(unique(temp$PLOT)) # Find unique sites
+  if(i == "WAGNER_et_al_2021") uq.taxa <- c("Papilionoidea", "Other") else uq.taxa <- "Papilionoidea" # Use Papilionoidea + Other data from Wagner et al., use only Papilionoidea data (majority of individuals) from other studies
+  returned <- c() # Initialize object for return
+  # Cycle through sites
+  for(j in uq.sites){
+    uq.time <- unique(temp[temp$PLOT == j, c("MONTH", "YEAR")]) # Find unique time points within site
+    # Cycle through taxa
+    for(k in uq.taxa){
+      temp2 <- temp[!is.na(temp$LEPIDOPTERA_SUPERFAMILY) & temp$LEPIDOPTERA_SUPERFAMILY == k & temp$PLOT == j,] # Subset again to taxon within site
+      if(nrow(temp2) == 0) next # If the taxon was absent -> Next iteration
+      temp.returned <- data.frame(study = i, group = k, site = j, region = unique(temp2$REGION)) # Initialize temporary object to be appended to returned object
+      temp.time <- uq.time # Copy unique time point vector
+      temp.time$time.scale <- c("month", "year")[as.logical(is.na(uq.time$MONTH[1])) + 1] # Identify time scale: monthly or annual
+      # Cycle through time points and calculate taxon richness
+      temp.time$rich <- vapply(1:nrow(temp.time), function(l){
+        # If the sampling point doesn't have a month value...
+        if(is.na(temp.time$MONTH[l])){
+          temp3 <- temp2[temp2$YEAR == temp.time$YEAR[l], ] # ... filter to entire year
+        } else {
+          temp3 <- temp2[temp2$MONTH == temp.time$MONTH[l] & temp2$YEAR == temp.time$YEAR[l], ] # ... else filter to specific month
+        }
+        if(nrow(temp3) == 0) return(0) # If taxon is absent, return richness of 0...
+        return(length(unique(temp3$TAXON))) # ... otherwise return the number of unique taxa
+      }, 0)
+      # Remove sampling bias highlighted by Wagner et al. (2021) in their Supplementary Material
+      if(i == "WAGNER_et_al_2021"){
+        grep.eois <- grep("eois", temp2$TAXON) # Find "eois" (genus of Geometridae Other)
+        if(length(grep.eois) > 0) temp2 <- temp2[-grep.eois,] # Remove those rows
+        grep.Eois <- grep("Eois", temp2$TAXON) # Find "Eois" (genus of Geometridae Other)
+        if(length(grep.Eois) > 0) temp2 <- temp2[-grep.Eois,] # Remove those rows
+        grep.quadrus <- grep("quadrus", temp2$TAXON) # Find "quadrus" (genus of Hesperiidae Papilionoidea)
+        if(length(grep.quadrus) > 0) temp2 <- temp2[-grep.quadrus,] # Remove those rows
+        grep.Quadrus <- grep("Quadrus", temp2$TAXON) # Find "Quadrus" (genus of Hesperiidae Papilionoidea)
+        if(length(grep.Quadrus) > 0) temp2 <- temp2[-grep.Quadrus,] # Remove those rows
+      }
+      # Cycle through time points and calculate Simpson's index
+      temp.time$simp <- vapply(1:nrow(temp.time), function(l){
+        # If the sampling point doesn't have a month value...
+        if(is.na(temp.time$MONTH[l])){
+          temp3 <- temp2[temp2$YEAR == temp.time$YEAR[l], ] # ... filter to entire year
+        } else {
+          temp3 <- temp2[temp2$MONTH == temp.time$MONTH[l] & temp2$YEAR == temp.time$YEAR[l], ] # ... else filter to specific month
+        }
+        # ... otherwise return the number of unique taxa
+        temp.taxa <- unique(temp3$TAXON) # Get unique taxa
+        count <- vapply(temp.taxa, function(m) return(sum(temp3$ABUNDANCE[temp3$TAXON == m])), 0) # Get counts of each taxon
+        return(diversity(count, "invsimpson")) # Calculate Simpson's index and return value
+      }, 0)
+      temp.time$simp[is.infinite(temp.time$simp)] <- NA # Remove infinite values before scaling
+      temp.returned <- cbind.data.frame(temp.returned, temp.time) # Add time/richness columns to temporary object
+      temp.returned$rich <- scale(temp.returned$rich, center = F) # Standardize richness values to Z
+      temp.returned$simp <- scale(temp.returned$simp-1, center = F) # Standardize Simpson's index values to Z
+      returned <- rbind.data.frame(returned, temp.returned) # Append temporary object to returned
+    }
+  }
+  return(returned) # Return output
+})
+div.lep <- do.call(rbind.data.frame, div.lep) # Combine list items into data frame object
+div.lep$oni <- vapply(1:nrow(div.lep), function(i) if(!is.na(div.lep$MONTH[i])) return(oni[oni$Year == div.lep$YEAR[i], div.lep$MONTH[i]+1]) else return(mean(as.numeric(oni[oni$Year == div.lep$YEAR[i], -1]))), 0) # Assign monthly ONI values to rows
+div.lep$time <- (div.lep$YEAR + div.lep$MONTH/12 - 1/12) - 2000 # Convert months and years to continuous time, and centre on 0
+div.lep$time[is.na(div.lep$time)] <- div.lep$YEAR[is.na(div.lep$time)] - 1999 # For rows where month is missing, assign them the year end-point, and centre on 0
+div.lep$site <- paste(div.lep$study, div.lep$site) # Ensure that sites shared between studies are modeled separately (eg BCI)
+div.lep <- div.lep[order(div.lep$site, div.lep$group, div.lep$time),] # Reorder "div.lep" rows by time, nested within taxonomic group, nested within study site
+
+### ADJUST WEIGHTS FOR WAGNER ET AL (2021)
+
+div.lep$wt <- 1 # Assign all data point weights as 1
+temp.wts <- vapply(div.lep$time[div.lep$site == "WAGNER_et_al_2021 SEL"], function(i) return(wagner.wts$weight[which.min(abs(wagner.wts$time - (i + 0.51)))]), 0) # Get temporary raw weights as recommended by Wagner et al.
+temp.wts <- temp.wts/sum(temp.wts) * length(temp.wts) # Standardize those weights to mean 1
+div.lep$wt[div.lep$study == "WAGNER_et_al_2021 SEL"] <- temp.wts # Replace those adjusted weights in the diversity data frame
+
+### MODELLING TEMPORAL CHANGE IN ARTHROPOD DIVERSITY - LEPIDOPTERA DIVERSITY IN THE AMERICAS AND ASIA
+
+lep.combs <- data.frame(group = c("Papilionoidea", "Papilionoidea", "Other"), region = c("Americas", "Asia", "Americas")) # Get combinations of Lepidoptera data (group/region)
+# Fit arthropod models for Lepidoptera in the Americas and Asia
+div.lep.mods <- 
+  # Return list of models for each Lepidoptera group
+  lapply(1:nrow(lep.combs), function(i){
+    group.data.rich <- div.lep[div.lep$group == lep.combs$group[i] & div.lep$region == lep.combs$region[i] & !is.na(div.lep$rich),] # Subset diversity data to arthropod order i - richness
+    group.data.simp <- div.lep[div.lep$group == lep.combs$group[i] & div.lep$region == lep.combs$region[i] & !is.na(div.lep$simp),] # Subset diversity data to arthropod order i - Simpson's
+    group.data.rich$wt <- group.data.rich$wt/sum(group.data.rich$wt)*nrow(group.data.rich) # Standardize weights - richness
+    group.data.simp$wt <- group.data.simp$wt/sum(group.data.simp$wt)*nrow(group.data.simp) # Standardize weights - richness
+    # Define model formulae dependent on whether some of the data is at mixed temporal resolution or not. If mixed...
+    if("month" %in% group.data.rich$time.scale & "year" %in% group.data.rich$time.scale){
+      rich.formula <- rich ~ 1 + s(oni, k = 3) + time + time:time.scale # Richness formula gets extra parameter for time scale adjustment...
+      simp.formula <- simp ~ 1 + s(oni, k = 3) + time + time:time.scale # Simpson's index formula gets extra parameter for time scale adjustment...
+    } else {
+      rich.formula <- rich ~ 1 + s(oni, k = 3) + time # Otherwise richness formula gets no extra parameter
+      simp.formula <- simp ~ 1 + s(oni, k = 3) + time # And neither does formula for Simpson's index
+    }
+    # If there are 0's in the richness response, use Tweedie distribution
+    if(any(group.data.rich$rich == 0)){
+      # Cycle through values of p to find best fitting Tweedie
+      current.p <- 1.01 # Start p parameter value
+      prev.AIC <- Inf # Start AIC off at maximum
+      lower.AIC <- T # Initialize while test
+      # While lower.AIC is true...
+      while(lower.AIC){
+        mod.rich <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+          gamm(rich.formula, # Fixed and smooth terms
+               random = list(site = ~ 1), # Random intercept
+               weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+               data = group.data.rich, # Data source
+               family = Tweedie(p = current.p), # Tweedie distribution with parameter p
+               correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+               niterPQL = 50), # Increased number of iterations for fit
+          error = function(.) return(NULL)) # Return NULL if fit fails
+        temp.AIC <- AIC(mod.rich$lme) # Get AIC from lme component
+        lower.AIC <- temp.AIC < prev.AIC # AIC test
+        # If the second iteration, and the first had lower AIC...
+        if(current.p == 1.02 & prev.AIC < temp.AIC){
+          mod.rich <- prev.mod # The first model gets assigned
+          lower.AIC <- F # Failed while test breaks loop
+        } else {
+          current.p <- current.p + 0.01 # Next p parameter value
+          prev.AIC <- temp.AIC # Previous AIC value gets current
+          prev.mod <- mod.rich # pPrevious model gets current
+        }
+      }
+      # If not 0's in the response, use Gamma distribution
+    } else {
+      mod.rich <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+        gamm(rich.formula, # Fixed and smooth terms
+             random = list(site = ~ 1), # Random intercept
+             weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+             data = group.data.rich, # Data source
+             family = Gamma("log"), # Gamma distribution error
+             correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+             niterPQL = 50), # Increased number of iterations for fit
+        error = function(.) return(NULL)) # Return NULL if fit fails
+    }
+    # If there are 0's in the Simpson's index response, use Tweedie distribution
+    if(any(group.data.simp$simp == 0)){
+      # Cycle through values of p to find best fitting Tweedie
+      current.p <- 1.01 # Start p parameter value
+      prev.AIC <- Inf # Start AIC off at maximum
+      lower.AIC <- T # Initialize while test
+      # While lower.AIC is true...
+      while(lower.AIC){
+        mod.simp <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+          gamm(simp.formula, # Fixed and smooth terms
+               random = list(site = ~ 1), # Random intercept
+               weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+               data = group.data.simp, # Data source
+               family = Tweedie(p = current.p), # Tweedie distribution with parameter p
+               correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+               niterPQL = 50), # Increased number of iterations for fit
+          error = function(.) return(NULL)) # Return NULL if fit fails
+        temp.AIC <- AIC(mod.simp$lme) # Get AIC from lme component
+        lower.AIC <- temp.AIC < prev.AIC # AIC test
+        # If the second iteration, and the first had lower AIC...
+        if(current.p == 1.02 & prev.AIC < temp.AIC){
+          mod.simp <- prev.mod # The first model gets assigned
+          lower.AIC <- F # Failed while test breaks loop
+        } else {
+          current.p <- current.p + 0.01 # Next p parameter value
+          prev.AIC <- temp.AIC # Previous AIC value gets current
+          prev.mod <- mod.simp # pPrevious model gets current
+        }
+      }
+    } else {
+      mod.simp <- tryCatch( # tryCatch function used to prevent script failure if a model fails to converge
+        gamm(simp.formula, # Fixed and smooth terms
+             random = list(site = ~ 1), # Random intercept
+             weight = wt, # Weights, mostly 1 besides Wagner et al. Costa Rica data
+             data = group.data.simp, # Data source
+             family = Gamma("log"), # Gamma distribution error
+             correlation = corCAR1(form = ~ time|site), # Continuous autocorrelation structure
+             niterPQL = 50), # Increased number of iterations for fit
+        error = function(.) return(NULL)) # Return NULL if fit fails
+    }
+    return(list(rich = mod.rich$gam, simp = mod.simp$gam)) # Return list of lists
+  })
+# Create data frame of summary information
+div.lep.mods.summaries <- 
+  cbind.data.frame( # Bind columns
+    Superfamily = rep(lep.combs$group, each = 2), # Group names
+    Region = rep(lep.combs$region, each = 2), # Region names
+    # Cycle through selected Lepidoptera models and return output in data frame to be incorporated
+    do.call(rbind.data.frame, lapply(div.lep.mods, function(x){
+      fixef.rich <- summary(x$rich)$p.table # Get summary of fixed effects for richness model
+      if(nrow(fixef.rich) == 2) fixef.rich <- rbind.data.frame(fixef.rich, NA) # If there is only one row in the fixed effects summary (no time scale adjustment term), add a row of NA values
+      smooth.rich <- summary(x$rich)$s.table # Get summary of smooth term for richness model
+      returned.rich <- data.frame( # Create returned data frame for terms of richness model
+        Diversity = "Richness",
+        Intercept.Estimate = round(fixef.rich[1,1], 3),
+        Intercept.SE = round(fixef.rich[1,2], 3),
+        Intercept.t = round(fixef.rich[1,3], 3),
+        Intercept.p = round(fixef.rich[1,4], 3),
+        Time.Gradient.Estimate = round(fixef.rich[2,1], 3),
+        Time.Gradient.SE = round(fixef.rich[2,2], 3),
+        Time.Gradient.t = round(fixef.rich[2,3], 3),
+        Time.Gradient.p = round(fixef.rich[2,4], 3),
+        Time.Scale.Gradient.Estimate = round(fixef.rich[3,1], 3),
+        Time.Scale.Gradient.SE = round(fixef.rich[3,2], 3),
+        Time.Scale.Gradient.t = round(fixef.rich[3,3], 3),
+        Time.Scale.Gradient.p = round(fixef.rich[3,4], 3),
+        ONI.Smooth.EDF = round(smooth.rich[1,1], 3),
+        ONI.Smooth.Ref.DF = round(smooth.rich[1,2], 3),
+        ONI.Smooth.F = round(smooth.rich[1,3], 3),
+        ONI.Smooth.p = round(smooth.rich[1,4], 3)
+      )
+      fixef.simp <- summary(x$simp)$p.table # Get summary of fixed effects for Simpson's index model
+      if(nrow(fixef.simp) == 2) fixef.simp <- rbind.data.frame(fixef.simp, NA) # If there is only one row in the fixed effects summary (no time scale adjustment term), add a row of NA values
+      smooth.simp <- summary(x$simp)$s.table # Get summary of smooth term for Simpson's index model
+      returned.simp <- data.frame( # Create returned data frame for terms of Simpson's index model
+        Diversity = "Inverse\nSimpson's",
+        Intercept.Estimate = round(fixef.simp[1,1], 3),
+        Intercept.SE = round(fixef.simp[1,2], 3),
+        Intercept.t = round(fixef.simp[1,3], 3),
+        Intercept.p = round(fixef.simp[1,4], 3),
+        Time.Gradient.Estimate = round(fixef.simp[2,1], 3),
+        Time.Gradient.SE = round(fixef.simp[2,2], 3),
+        Time.Gradient.t = round(fixef.simp[2,3], 3),
+        Time.Gradient.p = round(fixef.simp[2,4], 3),
+        Time.Scale.Gradient.Estimate = round(fixef.simp[3,1], 3),
+        Time.Scale.Gradient.SE = round(fixef.simp[3,2], 3),
+        Time.Scale.Gradient.t = round(fixef.simp[3,3], 3),
+        Time.Scale.Gradient.p = round(fixef.simp[3,4], 3),
+        ONI.Smooth.EDF = round(smooth.simp[1,1], 3),
+        ONI.Smooth.Ref.DF = round(smooth.simp[1,2], 3),
+        ONI.Smooth.F = round(smooth.simp[1,3], 3),
+        ONI.Smooth.p = round(smooth.simp[1,4], 3)
+      )
+      return(rbind.data.frame(returned.rich, returned.simp)) # Return single data frame
+    })))
+write.csv(div.lep.mods.summaries, file = "outputs/diversity_lep_summary.csv", row.names = F) # Write GAM summaries to file
+
+### PREDICTING DIVERSITY SHIFTS FROM FITTED MODELS - LEPIDOPTERA DIVERSITY IN THE AMERICAS AND ASIA
+
+temp.month <- data.frame(year = rep(min(div.lep$YEAR):max(div.lep$YEAR), each = 12), month = 1:12, time.scale = "month") # Initialize template data frame representing a monthly time series from earliest to latest data
+temp.month$time <- (temp.month$year + temp.month$month/12 - 1/12) - 2000 # Convert days years and months into continuous time centered on year 2000
+temp.month$oni <- vapply(1:nrow(temp.month), function(i) return(oni[oni$Year == temp.month$year[i], temp.month$month[i] + 1]), 0) # Extract the ONI value per month
+pred.lep <- c() # Initialize object for appending predictions to, to be predicted from later
+# Cycle through Lepidoptera groups/regions and generate predictions
+for(i in 1:nrow(lep.combs)){
+  temp.month2 <- temp.month # New template to be appended to
+  temp.years <- div.lep$YEAR[div.lep$group == lep.combs$group[i] & div.lep$region == lep.combs$region[i]] # Retrieve the years for which data on that order is available
+  temp.month2 <- temp.month2[temp.month2$year %in% temp.years,] # Subset rows to only those for years between the earliest and latest time point for that order
+  rich.mat <- predict(div.lep.mods[[i]]$rich, temp.month2, type = "lpmatrix") # Get richness predictor for time plus smooth on ONI variable
+  rich.coef <- coef(div.lep.mods[[i]]$rich) # Get richness coefficient estimates
+  rich.covar <- vcov(div.lep.mods[[i]]$rich) # And richness coefficient variance-covariance matrix
+  rich.rand <- mvrnorm(10000, rich.coef, rich.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+  rich.pred <- exp(as.matrix(rich.rand) %*% t(rich.mat)) # Derive 10,000 predictions
+  rich.qt <- as.data.frame(t(apply(rich.pred, 2, quantile, c(0.025, 0.5, 0.975)))) # Get quantiles from predictions
+  simp.mat <- predict(div.lep.mods[[i]]$simp, temp.month2, type = "lpmatrix") # Get Simpson's index predictor for time plus smooth on ONI variable
+  simp.coef <- coef(div.lep.mods[[i]]$simp) # Get Simpson's index coefficient estimates
+  simp.covar <- vcov(div.lep.mods[[i]]$simp) # And Simpson's index coefficient variance-covariance matrix
+  simp.rand <- mvrnorm(10000, simp.coef, simp.covar) # Sample 10,000 parameter estimates from multivariate normal distribution
+  simp.pred <- exp(as.matrix(simp.rand) %*% t(simp.mat)) # Derive 10,000 predictions
+  simp.qt <- as.data.frame(t(apply(simp.pred, 2, quantile, c(0.025, 0.5, 0.975)))) # Get quantiles from predictions
+  names(rich.qt) <- names(simp.qt) <- c("lwr", "med", "upr") # Give quantiles sensible names
+  temp.div.lep <- rbind.data.frame(cbind.data.frame(Group = lep.combs$group[i], Region = lep.combs$region[i], Diversity = "Richness", temp.month2, rich.qt), cbind.data.frame(Group = lep.combs$group[i], Region = lep.combs$region[i], Diversity = "Inverse\nSimpson's", temp.month2, simp.qt)) # Combine prediction quantiles for richness and Simpson's index
+  pred.lep <- rbind.data.frame(pred.lep, temp.div.lep) # Add predictions to pred object
+}
+pred.lep$time2 <- (pred.lep$year + pred.lep$month/12 - 1/12) - 2000 # Convert days years and months into continuous time centered on year 2000
+write.csv(pred.lep, "outputs/predictions_lep.csv", row.names = F) # Write predictions to file
+
+### PLOT PREDICTED ARTHROPOD DIVERSITY SHIFTS IN THE AMERICAS (FIG. 2)
+
+pred.lep$line_group <- NA # Add column for separating individual line stretches for each Lepidoptera group/region
+pred.lep$line_group[1] <- line.group <- 1 # Start at line 1
+# Iterate through line numbers
+for(i in 2:nrow(pred.lep)){
+  # If the current row is for a different Lepidoptera group/region to the last...
+  if(pred.lep$Group[i] != pred.lep$Group[i-1] | pred.lep$Region[i] != pred.lep$Region[i-1]){
+    line.group <- pred.lep$line_group[i] <- 1 # Line group gets reset to 1...
+    next # ... and next iteration
+  }
+  if(pred.lep$time[i] > (pred.lep$time[i-1] + 1) | pred.lep$Diversity[i] != pred.lep$Diversity[i-1]) line.group <- line.group + 1 # If there is a gap in prediction time or the diversity measure changes, start a new line section
+  pred.lep$line_group[i] <- line.group # Prediction data frame row i gets line group
+}
+pred.lep$Trend <- "No Trend" # Add column defining long-term trend significance
+# Cycle through Lepidoptera groups/regions
+for(i in 1:nrow(lep.combs)){
+  # Cycle through diversity measures
+  for(j in c("Richness", "Inverse\nSimpson's")){
+    if(div.lep.mods.summaries$Time.Gradient.p[div.lep.mods.summaries$Superfamily == lep.combs$group[i] & div.lep.mods.summaries$Region == lep.combs$region[i] & div.lep.mods.summaries$Diversity == j] < 0.05) pred.lep$Trend[pred.lep$Group == lep.combs$group[i] & pred.lep$Region == lep.combs$region[i] & pred.lep$Diversity == j] <- "Significant<br>(*P* < 0.05)" # Where long-term trend was significant in the model summary, update new column
+  }
+}
+pred.lep$Diversity <- factor(pred.lep$Diversity, levels = c("Richness", "Inverse\nSimpson's")) # Order diversity factor levels
+pred.lep$comb <- NA # Create new column for facet headings
+pred.lep$comb[pred.lep$Group == "Papilionoidea" & pred.lep$Region == "Americas"] <- "Papilionoidea\nin the Americas" # Top-left facet
+pred.lep$comb[pred.lep$Group == "Papilionoidea" & pred.lep$Region == "Asia"] <- "Papilionoidea\nin Asia" # Top-right facet
+pred.lep$comb[pred.lep$Group == "Other" & pred.lep$Region == "Americas"] <- "Other Superfamilies\nin the Americas" # Bottom-left facet
+pred.lep$comb <- factor(pred.lep$comb, levels = c("Papilionoidea\nin the Americas", "Papilionoidea\nin Asia", "Other Superfamilies\nin the Americas")) # Put factor levels in order
+p2a <- ggplot(pred.lep) + # Plot Lepidoptera predictions using ggplot
+  facet_wrap(~ comb, ncol = 2) +  # Grid of 3x3 sub-plots
+  geom_ribbon(aes(x = time, ymin = lwr, ymax = upr, fill = Diversity, group = line_group), alpha = 0.25) + # Confidence intervals
+  geom_line(aes(x = time, y = med, color = Diversity, group = line_group, linetype = Trend), linewidth = 0.25) + # Model lines
+  # Display adjustments
+  theme_light() +
+  theme(legend.position = "inside", legend.position.inside = c(0.8, 0.13), legend.spacing.y = unit(0, "cm"), text = element_text(size = 10), strip.text = element_text(colour = "black"), axis.text.x = element_text(angle = 75, hjust = 1), strip.background = element_rect(fill = "grey90", colour = "grey10")) +
+  guides(colour = guide_legend(ncol = 3, label.hjust=0)) +
+  scale_x_continuous("Year", breaks = seq(-20, 20, by = 5), labels = seq(1980, 2020, 5), expand = c(0,0)) +
+  scale_y_continuous("Lepidoptera Diversity (Z)", breaks = c(0, 0.5, 1, 1.5, 2), expand = c(0,0)) +
+  scale_fill_manual("Diversity Measure", breaks = c("Richness", "Inverse\nSimpson's"), values = c("skyblue3", "orange2")) +
+  scale_color_manual("Diversity Measure", breaks = c("Richness", "Inverse\nSimpson's"), values = c("skyblue3", "orange2")) +
+  scale_linetype_manual("Long-Term Trend", values = c(3,1))
+# Output plot to pdf
+pdf("outputs/figure_2_top.pdf", height = 4, width = 4)
+p2a
+dev.off()
+div.lep.mods.summaries$crit <- vapply(1:nrow(div.lep.mods.summaries), function(i) return(qt(0.975, df.residual(div.lep.mods[[ceiling(i/2)]][[c(1,2)[as.integer(div.lep.mods.summaries$Diversity[i] == "Inverse\nSimpson's") + 1]]]))), 0) # Derive critical values on t distribution for confidence intervals
+div.lep.mods.summaries$comb <- NA  # Create new column for y-axis labels
+div.lep.mods.summaries$comb[div.lep.mods.summaries$Superfamily == "Papilionoidea" & div.lep.mods.summaries$Region == "Americas"] <- "Papilionoidea\nin the Americas" # Label 1
+div.lep.mods.summaries$comb[div.lep.mods.summaries$Superfamily == "Papilionoidea" & div.lep.mods.summaries$Region == "Asia"] <- "Papilionoidea\nin Asia" # Label 2
+div.lep.mods.summaries$comb[div.lep.mods.summaries$Superfamily == "Other" & div.lep.mods.summaries$Region == "Americas"] <- "Other Superfamilies\nin the Americas" # Label 3
+div.lep.mods.summaries$comb <- factor(div.lep.mods.summaries$comb, levels = rev(c("Papilionoidea\nin the Americas", "Papilionoidea\nin Asia", "Other Superfamilies\nin the Americas"))) # Put factor levels in order
+div.lep.mods.summaries$Diversity <- factor(div.lep.mods.summaries$Diversity, levels = c("Inverse\nSimpson's", "Richness")) # Put factor levels in order
+p2b <- ggplot(div.lep.mods.summaries) +
+  annotate("rect", xmin = 0.5, xmax = 1.5, ymin = -Inf, ymax = Inf, alpha = 0.15) + # Grey background band
+  annotate("rect", xmin = 2.5, xmax = 3.5, ymin = -Inf, ymax = Inf, alpha = 0.15) + # Grey background band
+  geom_hline(aes(yintercept = 0), colour = "grey50", linewidth = 0.25) + # Vertical 0 line
+  geom_linerange(aes(x = comb, ymin = Time.Gradient.Estimate - Time.Gradient.SE*crit, ymax = Time.Gradient.Estimate + Time.Gradient.SE*crit, col = Diversity), position = position_dodge(width = 1), show.legend = F) + # Confidence intervals
+  geom_point(aes(x = comb, y = Time.Gradient.Estimate, col = Diversity), size = 2, position = position_dodge(width = 1), show.legend = F) + # Parameter estimate
+  # Display ajdjustments
+  coord_flip() +
+  theme_light() +
+  ylab("Long-Term Trend (log-scale)") +
+  scale_color_manual(breaks = rev(c("Inverse\nSimpson's", "Richness")), values = c("skyblue3", "orange2")) +
+  theme(text = element_text(size = 10), axis.title.y = element_blank())
+# Output plot to pdf
+pdf("outputs/figure_2_bottom.pdf", height = 1.3, width = 3.7)
+p2b
+dev.off()
+
+### PLOTTING LEPIDOPTERA ONI SMOOTHS FROM THE AMERICAS AND ASIA (ED2b)
+
+smooth.fits <- c() # Initialize object to append smooth data too
+# Cycle through Lepidoptera groups/regions
+for(i in 1:3){
+  # Cycle through diversity measures
+  for(j in 1:2){
+    temp.smooth <- gratia::draw(div.lep.mods[[i]][[j]], residuals = TRUE) # Get rough smooth plot via gratia
+    temp.smooth.fit <- as.data.frame(temp.smooth$data) # Extract the plotting data
+    smooth.fits <- rbind.data.frame(smooth.fits, cbind.data.frame(Superfamily = lep.combs$group[i], Region = lep.combs$region[i], Diversity = c("Richness", "Inverse<br>Simpson's")[j], temp.smooth.fit, sig = c("No Effect", "Significant<br>(*P* < 0.05)")[as.numeric(summary(div.lep.mods[[i]][[j]])$s.table[1,4] < 0.05) + 1])) # Append the plotting data to data frame
+  }
+}
+smooth.fits$comb <- NA # Create new column for facet headings
+smooth.fits$comb[smooth.fits$Superfamily == "Papilionoidea" & smooth.fits$Region == "Americas"] <- "Papilionoidea\nin the Americas" # Top-left facet
+smooth.fits$comb[smooth.fits$Superfamily == "Papilionoidea" & smooth.fits$Region == "Asia"] <- "Papilionoidea\nin Asia" # Top-right facet
+smooth.fits$comb[smooth.fits$Superfamily == "Other" & smooth.fits$Region == "Americas"] <- "Other Superfamilies\nin the Americas" # Bottom-left facet
+smooth.fits$comb <- factor(smooth.fits$comb, levels = c("Papilionoidea\nin the Americas", "Papilionoidea\nin Asia", "Other Superfamilies\nin the Americas")) # Put factor levels in order
+pED2 <- ggplot(smooth.fits) + # Plot smooths using ggplot
+  facet_wrap(~ comb, nrow = 1) + # Grid of subplots
+  geom_ribbon(aes(x = oni, ymin = .lower_ci, ymax = .upper_ci, fill = Diversity), alpha = 0.25) + # Confidence intervals
+  geom_line(aes(x = oni, y = .estimate, linetype = sig, col = Diversity), linewidth = 0.25) + # Model lines
+  # Display adjustments
+  theme_light() +
+  theme(text = element_text(size = 7), strip.text = element_text(colour = "black"), strip.background = element_rect(fill = "grey90", colour = "grey10"), legend.margin = margin(0, 0, 0, 0, "cm"), legend.text = element_markdown(), legend.key.size = unit(0.5, "cm")) +
+  scale_y_continuous("Partial Effect") +
+  xlab("ONI") +
+  scale_linetype_manual("ENSO Effect", values = c(3, 1)) +
+  scale_color_manual(breaks = rev(c("Inverse<br>Simpson's", "Richness")), values = c("skyblue3", "orange2")) +
+  scale_fill_manual(breaks = rev(c("Inverse<br>Simpson's", "Richness")), values = c("skyblue3", "orange2"))
+# Ouput ploot to pdf
+pdf("outputs/pED2.pdf", height = 1.57, width = 4.55)
+pED2
+dev.off()
+
+### PREDICTING TEMPORAL CHANGE IN ARTHROPOD-MEDIATED PROCESSES
+
+# Function for calculating weighted mean
+weighted.mean <- function(x, w){
+  # Sum of weights 
+  sum.w <- sum(w, na.rm = T)
+  # Sum of weighted values 
+  x.w <- sum(w*x, na.rm = T)
+  # Return weighted average 
+  return(x.w/sum.w)
+}
+# Function for calculating weighted standard errors around weighted mean
+weighted.se.mean <- function(x, w, na.rm = T){
+  # Remove NA values
+  not.na <- which(!is.na(x) & !is.na(w))
+  x <- x[not.na]
+  w <- w[not.na]
+  # Calculate effective N
+  n.eff <- sum(w)^2/sum(w^2)
+  # Correction factor
+  correction <- n.eff/(n.eff-1)
+  # Get weighted variance 
+  numerator <- sum(w*(x-weighted.mean(x,w))^2)
+  denominator <- sum(w)
+  # Calculate
+  se <- sqrt((correction * (numerator/denominator))/n.eff)
+  # Return SE
+  return(se)
+}
+# Adjsuted version of weightedCorr from wCorr that assesses significance through randomization
+weightedCorr2 <- function(x, y, method = "Pearson", weights = NULL, n = 9999){
+  na.vals <- which(is.na(x) | is.infinite(x) | is.nan(x) | is.na(y) | is.infinite(y) | is.nan(y)) # Identify missing values
+  if(is.null(weights)) weights <- rep(1, length(x)) # Give default weights if none provided
+  # If there are missing values
+  if(length(na.vals) > 0){
+    x <- x[-na.vals] # Remove missing values from x
+    y <- y[-na.vals] # Remove same positions from y
+    weights <- weights[-na.vals] # Remove same positions from weights vector
+  }
+  true.val <- weightedCorr(x = x, y = y, method = method, weights = weights) # Calculate true weighted correlation using original function
+  rand.vals <- vapply(1:n, function(.) return(weightedCorr(x = sample(x), y = y, method = method, weights = weights)), 0) # Recalculate randomized weighted correlations
+  p <- length(which(c(true.val, rand.vals) >= true.val))/(n + 1) # Derive p-value
+  return(c(cor = true.val, n = length(x), p = p)) # Return true value, sample size and p-value
+}
+deco.time <- c() # Initialize object for appending weighted annual mean decomposition rates
+# Cycle through unique regions in decomposition data
+for(i in unique(deco$Region)){
+  uq.time <- sort(unique(deco$study.year[deco$Region == i])) # Get unique years for region
+  # Create temporary data frame of weighted means and standard errors for each available year
+  temp.deco <- data.frame(Region = i, # Region
+                          year = uq.time, # Year
+                          mean.deco = vapply(uq.time, function(j) return(weighted.mean(deco$invert.effect[deco$study.year == j & deco$Region == i], deco$weight[deco$study.year == j & deco$Region == i])), 0), # Weighted mean of annual decomposition rate
+                          se = vapply(uq.time, function(j) return(weighted.se.mean(deco$invert.effect[deco$study.year == j & deco$Region == i], deco$weight[deco$study.year == j & deco$Region == i])), 0), # Weighted SE of annual decomposition rate
+                          weight = vapply(uq.time, function(j) return(sum(deco$weight[deco$study.year == j & deco$Region == i])), 0)) # Weighs
+  temp.deco$weight <- temp.deco$weight/sum(temp.deco$weight)*nrow(temp.deco) # Standardize weights within region subset
+  deco.time <- rbind.data.frame(deco.time, temp.deco) # Append temporary data frame
+}
+deco.time$oni.max.0 <- vapply(1:nrow(deco.time), function(i) return(max(as.numeric(oni[oni$Year == deco.time$year[i], -1]))), 0) # Get annual ONI maximum of data collection year...
+deco.time$oni.max.1 <- vapply(1:nrow(deco.time), function(i) return(max(as.numeric(oni[oni$Year == deco.time$year[i] - 1, -1]))), 0) # and one-year lag
+deco.time$oni.max.2 <- vapply(1:nrow(deco.time), function(i) return(max(as.numeric(oni[oni$Year == deco.time$year[i] - 2, -1]))), 0) # and two-year lag
+deco.time$aran.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae richness per year in the Americas
+deco.time$blat.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea richness per year in the Americas
+deco.time$col.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera richness per year in the Americas
+deco.time$dipt.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera richness per year in the Americas
+deco.time$hemi.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera richness per year in the Americas
+deco.time$hym.rich <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera richness per year in the Americas
+deco.time$aran.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae Simpson's index per year in the Americas
+deco.time$blat.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea Simpson's index per year in the Americas
+deco.time$col.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera Simpson's index per year in the Americas
+deco.time$dipt.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera Simpson's index per year in the Americas
+deco.time$hemi.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera Simpson's index per year in the Americas
+deco.time$hym.simp <- vapply(deco.time$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera Simpson's index per year in the Americas
+deco.time$asia.but.rich <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Asia
+deco.time$americas.but.rich <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in the Americas
+deco.time$americas.Other.rich <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera richness per year in the Americas
+deco.time$asia.but.simp <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Asia
+deco.time$americas.but.simp <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in the Americas
+deco.time$americas.Other.simp <- vapply(deco.time$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera Simpson's index per year in the Americas
+deco.region.cors <- data.frame(year = sort(unique(deco.time$year))) # Create data frame in which to calculate correlations in mean annual deposition rate between regions
+deco.region.cors$am <- vapply(deco.region.cors$year, function(x) if(length(deco.time$mean.deco[deco.time$Region == "Americas" & deco.time$year == x]) > 0) return(deco.time$mean.deco[deco.time$Region == "Americas" & deco.time$year == x]) else return(NA), 0) # Get mean values for Americas
+deco.region.cors$as <- vapply(deco.region.cors$year, function(x) if(length(deco.time$mean.deco[deco.time$Region == "Asia" & deco.time$year == x]) > 0) return(deco.time$mean.deco[deco.time$Region == "Asia" & deco.time$year == x]) else return(NA), 0) # Get mean values for Asia
+deco.region.cors$af <- vapply(deco.region.cors$year, function(x) if(length(deco.time$mean.deco[deco.time$Region == "Africa" & deco.time$year == x]) > 0) return(deco.time$mean.deco[deco.time$Region == "Africa" & deco.time$year == x]) else return(NA), 0) # Get mean values for Africa
+deco.cor.tests <- rbind.data.frame( # Create data frame of region x region correlation tests for annual mean decomposition rate
+  cbind.data.frame(Region1 = "Americas", Region2 = "Asia", as.data.frame(t(weightedCorr2(deco.region.cors$am, deco.region.cors$as)))), # Americas x Asia
+  cbind.data.frame(Region1 = "Americas", Region2 = "Africa", as.data.frame(t(weightedCorr2(deco.region.cors$am, deco.region.cors$af)))), # Americas x Africa
+  cbind.data.frame(Region1 = "Asia", Region2 = "Africa", as.data.frame(t(weightedCorr2(deco.region.cors$as, deco.region.cors$af)))) # Asia x Africa
+)
+write.csv(deco.cor.tests, file = "outputs/correlations_decomp_regions.csv", row.names = F) # Write correlations data frame to file
+deco.time$year <- deco.time$year - 2000 # Centre year on 2000
+deco.time$pre2000 <- as.integer(deco.time$year < 0) # Create column of year lesser than 2000 (true/false) for model
+deco.time$post2000 <- as.integer(deco.time$year > 0) # Create column of year greater than 2000 (true/false) for model
+deco.time$Region <- factor(deco.time$Region) # Put factor levels in order
+mod.deco <- gamm(mean.deco ~ # Predict annual mean decomposition rate
+                   1 + # Intercept only - no long-term change
+                   s(oni.max.1, k = 3), # MONI smooth term
+                   random = list(Region = ~1), # Random intercept for region
+                   correlation = corCAR1(form = ~ year|Region), # Continuous autocorrelation structure
+                data = deco.time, # Data source
+                weights = weight) # Weighted according to number of observations per year/region
+fixef.deco <- summary(mod.deco$gam)$p.table # Get summary of fixed effects
+smooth.deco <- summary(mod.deco$gam)$s.table # Get summary of ONI smooth
+summary.deco <- data.frame( # Create data frame of model summary
+  Process = "Decomposition",
+  Intercept.Estimate = round(fixef.deco[1,1], 3),
+  Intercept.SE = round(fixef.deco[1,2], 3),
+  Intercept.t = round(fixef.deco[1,3], 3),
+  Intercept.p = round(fixef.deco[1,4], 3),
+  Time.Estimate = NA,
+  Time.SE = NA,
+  Time.t = NA,
+  Time.p = NA,
+  ONI.Smooth.EDF = round(smooth.deco[1,1], 3),
+  ONI.Smooth.Ref.DF = round(smooth.deco[1,2], 3),
+  ONI.Smooth.F = round(smooth.deco[1,3], 3),
+  ONI.Smooth.p = round(smooth.deco[1,4], 3)
+)
+herb.time.yl <- c() # Initialize object for annual mean rates of leaf herbivory quantified on young leaves
+# Cycle through regions
+for(i in c("Americas", "Asia", "Africa")){
+  herb.yl <- herb[herb$Region == i & herb$Leaf.age == "Young" & !is.na(herb$Duration.month) & !is.na(herb$N.species), ] # Subset herbivory data to only young leaves
+  # If there is no data for the region, next region
+  if(nrow(herb.yl) == 0) next
+  herb.yl$k <- herb.yl$damage/herb.yl$Duration.month # Standardize leaf damage rate to per month
+  yl.years <- sort(unique(herb.yl$Study.year)) # Get vector of unique study years
+  temp.yl <- data.frame( # Create temporary data frame of weighted mean and standard errors for leaf area damage per year
+    Type = "Immature Leaves (per Month)",
+    Region = i,
+    year = yl.years,
+    k.mean = vapply(yl.years, function(j) return(weighted.mean(herb.yl$k[herb.yl$Study.year == j], herb.yl$N.species[herb.yl$Study.year == j])), 0), # Weighted mean
+    k.se = vapply(yl.years, function(j) return(weighted.se.mean(herb.yl$k[herb.yl$Study.year == j], herb.yl$N.species[herb.yl$Study.year == j])), 0), # Weighted SE
+    units = vapply(yl.years, function(j) return(sum(herb.yl$N.species[herb.yl$Study.year == j])), 0) # Number of species for which the mean value is representative
+  )
+  temp.yl$weight <- temp.yl$units/sum(temp.yl$units)*nrow(temp.yl) # Weights standardized from units
+  herb.time.yl <- rbind.data.frame(herb.time.yl, temp.yl) # Append temporary data frame to object
+}
+herb.time.yl$aran.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae richness per year in the Americas
+herb.time.yl$blat.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea richness per year in the Americas
+herb.time.yl$col.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera richness per year in the Americas
+herb.time.yl$dipt.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera richness per year in the Americas
+herb.time.yl$hemi.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera richness per year in the Americas
+herb.time.yl$hym.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera richness per year in the Americas
+herb.time.yl$aran.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae Simpson's index per year in the Americas
+herb.time.yl$blat.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea Simpson's index per year in the Americas
+herb.time.yl$col.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera Simpson's index per year in the Americas
+herb.time.yl$dipt.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera Simpson's index per year in the Americas
+herb.time.yl$hemi.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera Simpson's index per year in the Americas
+herb.time.yl$hym.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera Simpson's index per year in the Americas
+herb.time.yl$asia.but.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Asia
+herb.time.yl$americas.but.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Americas
+herb.time.yl$americas.Other.rich <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera richness per year in Americas
+herb.time.yl$asia.but.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Asia
+herb.time.yl$americas.but.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Americas
+herb.time.yl$americas.Other.simp <- vapply(herb.time.yl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera Simpson's index per year in Americas
+herb.time.ml <- c() # Initialize object for annual mean rates of leaf herbivory quantified on mature leaves
+# Cycle through regions
+for(i in c("Americas", "Asia", "Africa")){
+  herb.ml <- herb[herb$Region == i & herb$Leaf.age == "Mature" & !is.na(herb$Duration.month) & !is.na(herb$N.species), ] # Subset herbivory data to only mature leaves
+  # If there is no data for the region, next region
+  if(nrow(herb.ml) == 0) next
+  herb.ml$k <- herb.ml$damage/herb.ml$Duration.month * 12 # Standardize leaf damage rate to per year
+  herb.ml$k[herb.ml$k > 1] <- 1 # Where leaf damage is predicted > 100%, assign 100%
+  ml.years <- sort(unique(herb.ml$Study.year)) # Get vector of unique study years
+  temp.ml <- data.frame( # Create data frame of weighted mean and standard errors for leaf area damage per year
+    Type = "Mature Leaves (per Year)",
+    Region = i,
+    year = ml.years,
+    k.mean = vapply(ml.years, function(j) return(weighted.mean(herb.ml$k[herb.ml$Study.year == j], herb.ml$N.species[herb.ml$Study.year == j])), 0), # Weighted mean
+    k.se = vapply(ml.years, function(j) return(weighted.se.mean(herb.ml$k[herb.ml$Study.year == j], herb.ml$N.species[herb.ml$Study.year == j])), 0), # Weighted SE
+    units = vapply(ml.years, function(j) return(sum(herb.ml$N.species[herb.ml$Study.year == j])), 0) # Number of species for which the mean value is representative
+  )
+  temp.ml$weight <- temp.ml$units/sum(temp.ml$units)*nrow(temp.ml) # Weights standardized from units
+  herb.time.ml <- rbind.data.frame(herb.time.ml, temp.ml) # Append temporary data frame to object
+}
+herb.time.ml$aran.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae richness per year in the Americas
+herb.time.ml$blat.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea richness per year in the Americas
+herb.time.ml$col.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera richness per year in the Americas
+herb.time.ml$dipt.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera richness per year in the Americas
+herb.time.ml$hemi.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera richness per year in the Americas
+herb.time.ml$hym.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera richness per year in the Americas
+herb.time.ml$aran.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae Simpson's index per year in the Americas
+herb.time.ml$blat.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea Simpson's index per year in the Americas
+herb.time.ml$col.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera Simpson's index per year in the Americas
+herb.time.ml$dipt.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera Simpson's index per year in the Americas
+herb.time.ml$hemi.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera Simpson's index per year in the Americas
+herb.time.ml$hym.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera Simpson's index per year in the Americas
+herb.time.ml$asia.but.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Asia
+herb.time.ml$americas.but.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Americas
+herb.time.ml$americas.Other.rich <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera richness per year in Americas
+herb.time.ml$asia.but.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Asia
+herb.time.ml$americas.but.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Americas
+herb.time.ml$americas.Other.simp <- vapply(herb.time.ml$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera Simpson's index per year in Americas
+herb.time.rl <- c() # Initialize object for annual mean rates of leaf herbivory quantified on random leaves (opportunistically sampled)
+# Cycle through regions
+for(i in c("Americas", "Asia", "Africa")){
+  herb.rl <- herb[herb$Region == i & is.na(herb$Duration.month) & !is.na(herb$N.species), ] # Subset herbivory data to only opportunistic leaves
+  # If no data from the region, next region
+  if(nrow(herb.rl) == 0) next
+  herb.rl$k <- herb.rl$damage # No rate standardization
+  rl.years <- sort(unique(herb.rl$Study.year)) # Get vector of unique study years
+  temp.rl <- data.frame( # Create data frame of weighted mean and standard errors for leaf area damage per year
+    Type = "Opportunistic (Leaf Lifetime)",
+    Region = i,
+    year = rl.years,
+    k.mean = vapply(rl.years, function(j) return(weighted.mean(herb.rl$k[herb.rl$Study.year == j], herb.rl$N.species[herb.rl$Study.year == j])), 0), # Weighted mean
+    k.se = vapply(rl.years, function(j) return(weighted.se.mean(herb.rl$k[herb.rl$Study.year == j], herb.rl$N.species[herb.rl$Study.year == j])), 0), # Weighted SE
+    units = vapply(rl.years, function(j) return(sum(herb.rl$N.species[herb.rl$Study.year == j])), 0) # Number of species for which the mean value is representative
+  )
+  temp.rl$weight <- temp.rl$units/sum(temp.rl$units)*nrow(temp.rl) # Weights standardized from units
+  herb.time.rl <- rbind.data.frame(herb.time.rl, temp.rl) # Append temporary data frame to object
+}
+herb.time.rl$aran.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae richness per year in the Americas
+herb.time.rl$blat.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea richness per year in the Americas
+herb.time.rl$col.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera richness per year in the Americas
+herb.time.rl$dipt.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera richness per year in the Americas
+herb.time.rl$hemi.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera richness per year in the Americas
+herb.time.rl$hym.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Richness" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera richness per year in the Americas
+herb.time.rl$aran.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Araneae"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Araneae" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Araneae Simpson's index per year in the Americas
+herb.time.rl$blat.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Blattodea"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Blattodea" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Blattodea Simpson's index per year in the Americas
+herb.time.rl$col.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Coleoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Coleoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Coleoptera Simpson's index per year in the Americas
+herb.time.rl$dipt.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Diptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Diptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Diptera Simpson's index per year in the Americas
+herb.time.rl$hemi.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hemiptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hemiptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hemiptera Simpson's index per year in the Americas
+herb.time.rl$hym.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.americas$year[pred.americas$Order == "Hymenoptera"]) return(max(pred.americas$med[pred.americas$Diversity == "Inverse\nSimpson's" & pred.americas$Order == "Hymenoptera" & pred.americas$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Hymenoptera Simpson's index per year in the Americas
+herb.time.rl$asia.but.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Asia
+herb.time.rl$americas.but.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea richness per year in Americas
+herb.time.rl$americas.Other.rich <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Richness" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera richness per year in Americas
+herb.time.rl$asia.but.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Asia" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Asia
+herb.time.rl$americas.but.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Papilionoidea" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted Papilionoidea Simpson's index per year in Americas
+herb.time.rl$americas.Other.simp <- vapply(herb.time.rl$year, function(i) if(i %in% pred.lep$year[pred.lep$Region == "Americas" & pred.lep$Group == "Other"]) return(max(pred.lep$med[pred.lep$Diversity == "Inverse\nSimpson's" & pred.lep$Region == "Americas" & pred.lep$Group == "Other" & pred.lep$year == i], na.rm = T)) else return(NA), 0) # Get maximum predicted non-Papilionoidea Lepidoptera Simpson's index per year in Americas
+herb.all <- rbind.data.frame(herb.time.yl, herb.time.ml, herb.time.rl) # Combine different herbivory data categories into a single data frame
+herb.cor.test <- rbind.data.frame( # Create data frame of region x year correlation tests for annual mean leaf herbivory rate
+  cbind.data.frame(Region = "Americas", Type = "Immature Leaves (per Month)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Americas" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Americas" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Americas" & herb.all$year >= 2000])))), # Immature leaves in the Americas
+  cbind.data.frame(Region = "Americas", Type = "Mature Leaves (per Year)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Americas" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Americas" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Americas" & herb.all$year >= 2000])))), # Mature leaves in the Americas
+  cbind.data.frame(Region = "Americas", Type = "Opportunistic (Leaf Lifetime)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Americas" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Americas" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Americas" & herb.all$year >= 2000])))), # Opportunistic leaves in the Americas
+  cbind.data.frame(Region = "Asia", Type = "Immature Leaves (per Month)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Asia" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Asia" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Asia" & herb.all$year >= 2000])))), # Immature leaves in Asia
+  cbind.data.frame(Region = "Asia", Type = "Mature Leaves (per Year)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Asia" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Asia" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Asia" & herb.all$year >= 2000])))), # Mature leaves in Asia
+  cbind.data.frame(Region = "Asia", Type = "Opportunistic (Leaf Lifetime)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Asia" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Asia" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Asia" & herb.all$year >= 2000])))), # Opportunistic leaves in Asia
+  cbind.data.frame(Region = "Africa", Type = "Immature Leaves (per Month)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Africa" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Africa" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Immature Leaves (per Month)" & herb.all$Region == "Africa" & herb.all$year >= 2000])))), # Immature leaves in Africa
+  cbind.data.frame(Region = "Africa", Type = "Mature Leaves (per Year)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Africa" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Africa" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Mature Leaves (per Year)" & herb.all$Region == "Africa" & herb.all$year >= 2000])))), # Mature leaves in Africa
+  cbind.data.frame(Region = "Africa", Type = "Opportunistic (Leaf Lifetime)", as.data.frame(t(weightedCorr2(herb.all$k.mean[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Africa" & herb.all$year >= 2000], herb.all$year[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Africa" & herb.all$year >= 2000], weight = herb.all$weight[herb.all$Type == "Opportunistic (Leaf Lifetime)" & herb.all$Region == "Africa" & herb.all$year >= 2000])))) # Opportunistic leaves in Africa
+)
+write.csv(herb.cor.test, file = "outputs/correlations_herbiv_regions.csv", row.names = F) # Write correlations data frame to file
+herb.all$k.se[is.infinite(herb.all$k.se)] <- NA # Remove infinite standard error values (from single value observations)
+herb.all$oni.max.0 <- vapply(herb.all$year, function(i) return(max(as.numeric(oni[oni$Year == i, -1]))), 0) # Get annual ONI maximum per year...
+herb.all$oni.max.1 <- vapply(herb.all$year, function(i) return(max(as.numeric(oni[oni$Year == i - 1, -1]))), 0) # and one-year lag
+herb.all$oni.max.2 <- vapply(herb.all$year, function(i) return(max(as.numeric(oni[oni$Year == i - 2, -1]))), 0) # and two-year lag
+herb.all$year <- herb.all$year - 2000 # Centre time on year 2000
+herb.all$pre2000 <- as.integer(herb.all$year <= 0) # Create column of year lesser than 2000 (true/false) for model
+herb.all$post2000 <- as.integer(herb.all$year >= 0) # Create column of year greater than 2000 (true/false) for model
+herb.all$Region <- factor(herb.all$Region) # Put factor levels in order
+mod.herb <- gamm(k.mean ~ # Predict annual mean leaf herbivory rate
+                   1 + year:post2000+ # Intercept + non-0 line gradient after year 2000
+                   s(oni.max.0, k = 3), # MONI smooth term
+                 random = list(Region = ~1, Type = ~ 1), # Random intercepts for region and leaf herbivory type (young leaves, mature, or opportunistic)
+                 correlation = corCAR1(form = ~ year|Region), # Continuous autocorrelation structure
+                 data = herb.all, # Data source
+                 weights = weight, # Weighted according to number of observations per year/region
+                 family = Gamma("log")) # Gamma error family with log link function 
+fixef.herb <- summary(mod.herb$gam)$p.table # Get summary of fixed effects
+smooth.herb <- summary(mod.herb$gam)$s.table # Get summary of ONI smooth
+summary.herb <- data.frame( # Create data frame of model summary
+  Process = "Herbivory",
+  Intercept.Estimate = round(fixef.herb[1,1], 3),
+  Intercept.SE = round(fixef.herb[1,2], 3),
+  Intercept.t = round(fixef.herb[1,3], 3),
+  Intercept.p = round(fixef.herb[1,4], 3),
+  Time.Estimate = round(fixef.herb[2,1], 3),
+  Time.SE = round(fixef.herb[2,2], 3),
+  Time.t = round(fixef.herb[2,3], 3),
+  Time.p = round(fixef.herb[2,4], 3),
+  ONI.Smooth.EDF = round(smooth.herb[1,1], 3),
+  ONI.Smooth.Ref.DF = round(smooth.herb[1,2], 3),
+  ONI.Smooth.F = round(smooth.herb[1,3], 3),
+  ONI.Smooth.p = round(smooth.herb[1,4], 3)
+)
+processes.summary <- rbind.data.frame(summary.deco, summary.herb) # Combine process summaries
+write.csv(processes.summary, file = "outputs/processes_summary.csv", row.names = F) # Write model summaries to file
+
+### PLOT ARTHROPOD-MEDIATED PROCESSES THROUGH TIME (FIG. 3)
+
+pred.deco.years <- seq(min(deco.time$year), max(deco.time$year), length.out = 1000) # Time vector to predict from
+oni.max.1 <- predict(loess(vapply(pred.deco.years, function(i) return(max(oni[oni$Year == round(i + 2000) - 1, -1])), 0) ~ pred.deco.years, span = 1/12)) # Maximum ONI values to predict from, smoothed to the maximum extent
+temp.pred <- predict(mod.deco$gam, data.frame(year = pred.deco.years, pre2000 = as.integer(pred.deco.years < 0), oni.max.1), se.fit = T) # Predict from decomposition model
+pred.deco <- data.frame(year = pred.deco.years, oni.max.1 = oni.max.1, lwr = temp.pred$fit - 1.96*temp.pred$se.fit, med = temp.pred$fit, upr = temp.pred$fit + 1.96*temp.pred$se.fit) # Derive confidence intervals and assemble plotting data frame
+deco.time$lwr <- deco.time$mean.deco - deco.time$se # Derive lower bounds of SE on data points
+deco.time$upr <- deco.time$mean.deco + deco.time$se # Derive upper bounds of SE on data points
+deco.time$lwr[deco.time$lwr < -0.25] <- -0.25 # Truncate one SE range for plotting
+p3a <- ggplot(deco.time) + # Plot predicted invertebrate-mediated decomposition rate through
+  geom_linerange(aes(x = year, ymin = lwr, ymax = upr, col = Region), linewidth = 0.25) + # SE on data points
+  geom_point(aes(x = year, y = mean.deco, size = weight, col = Region)) + # Annual weighted means
+  geom_ribbon(aes(x = year, ymin = lwr, ymax = upr), alpha = 0.25, data = pred.deco) + # Model confidence intervals
+  geom_line(aes(x = year, y = med), data = pred.deco, linewidth = 0.25) + # Model line
+  # Display adjustments
+  scale_x_continuous("Year", breaks = c(-20, -10, 0, 10, 20), labels = c("1980", "1990", "2000", "2010", "2020"), limits = c(-21,21)) +
+  ylab("Invertebrate Decomp.") +
+  theme_light() +
+  scale_size_identity("Weight", breaks = c(0.2, 1, 5), labels = c(0.2, 1, 5), guide = "legend", trans="sqrt") +
+  theme(text = element_text(size = 10)) +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "top") +
+  scale_color_manual(values = c("goldenrod1", "olivedrab3", "darkolivegreen"))
+temp.p.deco <- gratia::draw(mod.deco, residuals = TRUE) # Draw smooth summary using gratia
+deco.smooth.data <- as.data.frame(temp.p.deco$data) # Extract data from gratia-created object
+p3b <- ggplot(deco.smooth.data) + # Plot smooth summary using ggplot
+  geom_point(aes(x = oni.max.1, y = partial_residual, col = deco.time$Region, size = deco.time$weight), data = temp.p.deco$layers[[1]]$data, show.legend = F) + # Residuals
+  geom_ribbon(aes(x = oni.max.1, ymin = .lower_ci, ymax = .upper_ci), fill = "grey50", alpha = 0.25) + # Confidence intervals
+  geom_line(aes(x = oni.max.1, y = .estimate), linewidth = 0.25) + # Partial effect
+  # Display adjustments
+  theme_light() +
+  scale_size_identity("Weight", breaks = c(0.2, 1, 5), guide = "legend", trans="sqrt") +
+  theme(text = element_text(size = 10), axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  ylab("Partial Effect on Decomp.") +
+  scale_x_continuous("Annual ONI Maximum", limits = c(-1, 2.6)) +
+  scale_color_manual(values = c("goldenrod1", "olivedrab3", "darkolivegreen"))
+pred.herb.years <- seq(min(herb.all$year), max(herb.all$year), length.out = 1000) # Time vector to predict from
+oni.max.0 <- predict(loess(vapply(pred.herb.years, function(i) return(max(oni[oni$Year == round(i + 2000) - 1, -1])), 0) ~ pred.herb.years, span = 1/12)) # Maximum ONI values to predict from, smoothed to the maximum extent
+temp.pred <- predict(mod.herb$gam, data.frame(year = pred.herb.years, post2000 = as.integer(pred.herb.years > 0), oni.max.0), se.fit = T, type = "link") # Predict from herbivory model
+pred.herb <- data.frame(year = pred.herb.years, lwr = exp(temp.pred$fit - 1.96*temp.pred$se.fit), med = exp(temp.pred$fit), upr = exp(temp.pred$fit + 1.96*temp.pred$se.fit)) # Derive confidence intervals and assemble plotting data frame
+pred.herb$upr[pred.herb$upr > 1] <- 1 # Adjust upper CIs to not be greater than 100% leaf herbivory
+herb.all$legend <- "Immature" # Create column for legend
+herb.all$legend[herb.all$Type == "Mature Leaves (per Year)"] <- "Mature" # Mature leaves in legend
+herb.all$legend[herb.all$Type == "Opportunistic (Leaf Lifetime)"] <- "Opportunistic" # Opportunistic leaves in legend
+p3c <- ggplot(herb.all) + # Plot invertebrate-mediated leaf herbivory through time using ggplot
+  geom_linerange(aes(x = year + 2000, ymin = k.mean - k.se, ymax = k.mean + k.se, col = Region), linewidth = 0.25) + # SE on data points
+  geom_point(aes(x = year + 2000, y = k.mean, size = weight, col = Region, shape = legend)) + # Annual weighted means
+  geom_ribbon(aes(x = year + 2000, ymin = lwr, ymax = upr), alpha = 0.25, data = pred.herb) + # Model confidence intervals
+  geom_line(aes(x = year + 2000, y = med), data = pred.herb, linewidth = 0.25) + # Model line
+  # Display adjustments
+  scale_x_continuous("Year", breaks = c(1980, 1990, 2000, 2010, 2020), labels = c("1980", "1990", "2000", "2010", "2020"), limits = c(1979,2021)) +
+  scale_y_log10("Invertebrate Herbivory", breaks = c(0.01, 0.03, 0.1, 0.3, 1)) +
+  theme_light() +
+  scale_size_identity("Weight", breaks = c(0.2, 1, 5), guide = "legend", trans="sqrt") +
+  theme(text = element_text(size = 10), legend.text = element_text(size = 8), legend.background = element_rect(fill = NA),  legend.key.spacing = unit(0.015, "cm"), legend.key.size = unit(0.2, "cm"), legend.position = "right", strip.text = element_text(colour = "black"), legend.margin = margin(0,0,0,0, "cm"), strip.background = element_rect(fill = "grey90", colour = "grey10")) +
+  scale_shape_manual("Leaf Type", values = c(15,17,16), breaks = c("Opportunistic", "Mature", "Immature")) +
+  scale_color_manual(values = c("goldenrod1", "olivedrab3", "darkolivegreen")) +
+  guides(size = "none", color = "none")
+temp.p.herb <- gratia::draw(mod.herb, residuals = TRUE) # Draw smooth summary using gratia
+herb.smooth.data <- as.data.frame(temp.p.herb$data) # Extract data from gratia-created object
+p3d <- ggplot(herb.smooth.data) + # Plot smooth summary using ggplot
+  geom_point(aes(x = oni.max.0, y = partial_residual, col = herb.all$Region, size = herb.all$weight, shape = herb.all$legend), data = temp.p.herb$layers[[1]]$data, show.legend = F) + # Residuals
+  geom_ribbon(aes(x = oni.max.0, ymin = .lower_ci, ymax = .upper_ci), fill = "grey50", alpha = 0.25) + # Confidence intervals
+  geom_line(aes(x = oni.max.0, y = .estimate), linewidth = 0.25) + # Partial effect
+  # Display adjustments
+  theme_light() +
+  scale_size_identity("Weight", breaks = c(0.2, 1, 5), guide = "legend", trans="sqrt") +
+  scale_shape_manual("Leaf Type", values = c(15,17,16), breaks = c("Opportunistic", "Mature", "Immature")) +
+  theme(text = element_text(size = 10)) +
+  scale_y_continuous("Partial Effect on Herbivory", breaks = seq(-1.5, 2, by = 0.5)) +
+  scale_x_continuous("Annual ONI Maximum", limits = c(-1, 2.6)) +
+  scale_color_manual(values = c("goldenrod1", "olivedrab3", "darkolivegreen"))
+pdf("outputs/p3_without_legend.pdf", width = 6, height = 5) # Output plot to pdf
+plot_grid(p3a + theme(legend.position = "none"), p3b, p3c + theme(legend.position = "none"), p3d, align = "v", nrow = 2, axis = "tblr", rel_widths = c(1, 0.7), rel_heights = c(1, 1.16))
+dev.off()
+pdf("outputs/p3_bottom_legend.pdf", width = 4, height = 1, bg = "transparent") # Output main legend to pdf
+temp <- ggplot_gtable(ggplot_build(p3a + theme(legend.text.position = "bottom"))) # Create gtable
+which.legend <- which(sapply(temp$grobs, function(y) y$name) == "guide-box") # Find the legend
+legend <- temp$grobs[[which.legend]] # Extract the legend form grobs
+grid.draw(legend) # Plot legend
+dev.off()
+pdf("outputs/p3c_inner_legend.pdf", height = 0.45, width = 1.2, bg = "transparent") # Output inner legend for leaf herbivory to pdf
+legend <- get_legend(p3c) # Get legend using cowplot
+grid.draw(legend) # Plot legend
+dev.off()
+
+### CALCULATE CORRELATIONS BETWEEN PREDICTED ARTHROPOD DIVERSITY AND PROCESSES
+
+deco.time.ams <- deco.time[deco.time$Region == "Americas",] # Get decomposition data for only the Americas 
+deco.rich.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Richness",
+  Process = "Decomposition",
+  Leaf_Type = NA,
+  t(vapply(c("aran.rich", "blat.rich", "col.rich", "dipt.rich", "hemi.rich", "hym.rich", "americas.but.rich", "americas.Other.rich"), function(x) return(weightedCorr2(deco.time.ams$mean.deco, deco.time.ams[, x], method = "Spearman", weights = deco.time.ams$weight)), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+deco.even.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Inverse\nSimpson's",
+  Process = "Decomposition",
+  Leaf_Type = NA,
+  t(vapply(c("aran.simp", "blat.simp", "col.simp", "dipt.simp", "hemi.simp", "hym.simp", "americas.but.simp", "americas.Other.simp"), function(x) return(weightedCorr2(deco.time.ams$mean.deco, deco.time.ams[, x], method = "Spearman", weights = deco.time.ams$weight)), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.am <- herb.all[herb.all$Region == "Americas",] # Get herbivory data for only the Americas
+herb.yl.rich.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Richness",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Immature",
+  t(vapply(c("aran.rich", "blat.rich", "col.rich", "dipt.rich", "hemi.rich", "hym.rich", "americas.but.rich", "americas.Other.rich"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Immature Leaves (per Month)"], herb.am[herb.am$Type == "Immature Leaves (per Month)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Immature Leaves (per Month)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.yl.even.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Inverse\nSimpson's",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Immature",
+  t(vapply(c("aran.simp", "blat.simp", "col.simp", "dipt.simp", "hemi.simp", "hym.simp", "americas.but.simp", "americas.Other.simp"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Immature Leaves (per Month)"], herb.am[herb.am$Type == "Immature Leaves (per Month)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Immature Leaves (per Month)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.ml.rich.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Richness",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Mature",
+  t(vapply(c("aran.rich", "blat.rich", "col.rich", "dipt.rich", "hemi.rich", "hym.rich", "americas.but.rich", "americas.Other.rich"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Mature Leaves (per Year)"], herb.am[herb.am$Type == "Mature Leaves (per Year)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Mature Leaves (per Year)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.ml.even.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Inverse\nSimpson's",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Mature",
+  t(vapply(c("aran.simp", "blat.simp", "col.simp", "dipt.simp", "hemi.simp", "hym.simp", "americas.but.simp", "americas.Other.simp"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Mature Leaves (per Year)"], herb.am[herb.am$Type == "Mature Leaves (per Year)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Mature Leaves (per Year)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.rl.rich.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Richness",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Opportunistic",
+  t(vapply(c("aran.rich", "blat.rich", "col.rich", "dipt.rich", "hemi.rich", "hym.rich", "americas.but.rich", "americas.Other.rich"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Opportunistic (Leaf Lifetime)"], herb.am[herb.am$Type == "Opportunistic (Leaf Lifetime)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Opportunistic (Leaf Lifetime)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+herb.rl.even.cors <- cbind.data.frame( # Create data frame of weighted correlations between predicted diversity and observed mean annual rate
+  Group = c(groups.americas[-7], "Lepidoptera:\nPapilionoidea", "Lepidoptera:\nOther Superfamilies"),
+  Diversity = "Inverse\nSimpson's",
+  Process = "Leaf Herbivory",
+  Leaf_Type = "Opportunistic",
+  t(vapply(c("aran.simp", "blat.simp", "col.simp", "dipt.simp", "hemi.simp", "hym.simp", "americas.but.simp", "americas.Other.simp"), function(x) return(weightedCorr2(herb.am$k.mean[herb.am$Type == "Opportunistic (Leaf Lifetime)"], herb.am[herb.am$Type == "Opportunistic (Leaf Lifetime)", x], method = "Spearman", weights = herb.am$weight[herb.am$Type == "Opportunistic (Leaf Lifetime)"])), c(cor = 0, n = 0, p = 0))) # Weighted correlations
+)
+cor.data <- rbind.data.frame(deco.even.cors, deco.rich.cors, herb.yl.even.cors, herb.yl.rich.cors, herb.ml.even.cors, herb.ml.rich.cors, herb.rl.even.cors, herb.rl.rich.cors) # Combine correlation data frames
+cor.data$p[cor.data$n < 5] <- NA # Remove calculated p-values where n < 5 (insufficient data)
+write.csv(cor.data, file = "outputs/diversity_function_cors.csv", row.names = F) # Output correlations to file
+
+### PLOT CORRELATIONS BETWEEN PREDICTED DIVERSITY AND OBSERVED PROCESS RATE (FIG. 4)
+
+cor.data$Group <- factor(cor.data$Group, levels = c("Lepidoptera:\nOther Superfamilies", "Lepidoptera:\nPapilionoidea", "Hymenoptera", "Hemiptera", "Diptera", "Coleoptera", "Blattodea", "Araneae")) # Put factor levels in order
+cor.data$Process <- factor(cor.data$Process, levels = sort(unique(cor.data$Process))) # Put factor levels in order
+cor.data$Leaf_Type <- factor(cor.data$Leaf_Type, levels = sort(unique(cor.data$Leaf_Type))) # Put factor levels in order
+cor.data$Diversity <- factor(cor.data$Diversity, levels = sort(unique(cor.data$Diversity))) # Put factor levels in order
+p4 <- ggplot(cor.data) + # Plot correlations using ggplot
+  facet_wrap(~ Process) + # 2 subploes
+  annotate("rect", xmin = -1, xmax = 1, ymin = 2.5, ymax = 3.5, alpha = 0.15) + # Background rectangles for clarity
+  annotate("rect", xmin = -1, xmax = 1, ymin = 4.5, ymax = 5.5, alpha = 0.15) + # Background rectangles for clarity
+  annotate("rect", xmin = -1, xmax = 1, ymin = 6.5, ymax = 7.5, alpha = 0.15) + # Background rectangles for clarity
+  geom_col(aes(x = cor, y = Group, fill = Diversity), position = position_dodge(width = 1), linewidth = 0.25, data = cor.data[cor.data$Process == "Decomposition",]) + # Correlation bars for decomposition
+  geom_col(aes(x = cor, y = Group, col = Diversity, col = Leaf_Type), fill = "white", position = position_dodge(width = 1), linewidth = NA, show.legend = F,data = cor.data[cor.data$Process == "Leaf Herbivory" & cor.data$n >= 5,]) + # Horrible hack - background filler for herbivory correlations
+  geom_col(aes(x = cor, y = Group, fill = Diversity, alpha = Leaf_Type), position = position_dodge(width = 1), linewidth = 0.25, data = cor.data[cor.data$Process == "Leaf Herbivory" & cor.data$n >= 5,]) + # Correlation bars for herbivory
+  # Display adjustments
+  guides(alpha = "none") +
+  scale_fill_manual(breaks = rev(c("Inverse\nSimpson's", "Richness")), values = c("skyblue3", "orange2")) +
+  geom_vline(aes(xintercept = 0), colour = "grey50", linewidth = 0.25) +
+  scale_alpha_manual("Herbivory Type", values = c(0.4, 0.7, 1)) +
+  theme_light() +
+  theme(text = element_text(size = 10), legend.position = "top", panel.grid.major.y = element_blank(), strip.text = element_text(colour = "black"), legend.margin = margin(0,0,0,0, "cm"), strip.background = element_rect(fill = "grey90", colour = "grey10")) +
+  ylab(element_blank()) +
+  scale_x_continuous("Correlation Between Estimated Diversity and\n Observed Process in the Tropical Americas", breaks = c(-0.8, -0.4, 0, 0.4, 0.8), expand = c(0,0), limits = c(-1,1))
+pdf("outputs/p4.pdf", height = 3.5, width = 4.5) # Output plot to pdf
+p4
+dev.off()
+p4.dummy <- ggplot(cor.data) + # Dummy plot to generate legend
+  geom_col(aes(x = cor, y = Group, alpha = Leaf_Type), position = position_dodge(width = 1), linewidth = 0.25, show.legend = T, data = cor.data[cor.data$Process == "Leaf Herbivory" & cor.data$n >= 5,]) +
+  scale_alpha_manual("Leaf Type", values = c(1, 0.7, 0.4), breaks = c("Opportunistic", "Mature", "Immature")) +
+  theme(text = element_text(size = 8), legend.background = element_rect(fill = NA),  legend.key.spacing = unit(0.015, "cm"), legend.key.size = unit(0.2, "cm"), legend.position = "right", panel.grid.major.y = element_blank(), strip.text = element_text(colour = "black"), legend.margin = margin(0,0,0,0, "cm"), strip.background = element_rect(fill = "grey90", colour = "grey10"))
+pdf("outputs/p4_inner_legend.pdf", height = 0.45, width = 0.7, bg = "transparent") # Output legend to pdf
+grid.draw(get_legend(p4.dummy))
+dev.off()
+
+### END
